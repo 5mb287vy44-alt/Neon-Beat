@@ -268,6 +268,7 @@ final class Game: ObservableObject {
     var offs: [(Double, Double)] = []
     var flashP = CGPoint(x: 200, y: 400)
     var trail: [(CGPoint, Double)] = []
+    var origin = CGPoint.zero
     @Published var track = UserDefaults.standard.integer(forKey: "nb_track") {
         didSet {
             let i = min(max(track, 0), Track.all.count - 1)
@@ -367,7 +368,7 @@ final class Game: ObservableObject {
         }
         guard r < p else { return }
         let dist = min(0.12 + Double(n) * 0.0015, 0.45) * (0.6 + 0.4 * d) * (stream ? 0.35 : 1)
-        lx = min(max(lx + cos(a * 2 * Double.pi) * dist * (size.width > size.height ? 0.55 : 1), 0.1), 0.9)
+        lx = min(max(lx + cos(a * 2 * Double.pi) * dist * 0.75, 0.1), 0.9)
         ly = min(max(ly + sin(a * 2 * Double.pi) * dist * 0.7, 0.2), 0.82)
         if !half && n >= 24 && k < 0.2 && !stream {               // слайдер
             let rep = (n >= 64 && k < 0.08) ? 2 : 1
@@ -588,15 +589,19 @@ struct TouchPad: UIViewRepresentable {
     func updateUIView(_ v: PadView, context: Context) { v.g = g }
     final class PadView: UIView {
         var g: Game?
+        func loc(_ t: UITouch) -> CGPoint {
+            let q = t.location(in: self)
+            return CGPoint(x: q.x - (g?.origin.x ?? 0), y: q.y - (g?.origin.y ?? 0))
+        }
         override func touchesBegan(_ ts: Set<UITouch>, with e: UIEvent?) {
             for t in ts {
-                let p = t.location(in: self)
+                let p = loc(t)
                 g?.touches.pts[ObjectIdentifier(t)] = p
                 g?.tap(p)
             }
         }
         override func touchesMoved(_ ts: Set<UITouch>, with e: UIEvent?) {
-            for t in ts { g?.touches.pts[ObjectIdentifier(t)] = t.location(in: self) }
+            for t in ts { g?.touches.pts[ObjectIdentifier(t)] = loc(t) }
         }
         override func touchesEnded(_ ts: Set<UITouch>, with e: UIEvent?) {
             for t in ts { g?.touches.pts.removeValue(forKey: ObjectIdentifier(t)) }
@@ -616,9 +621,16 @@ struct PlayView: View {
             TimelineView(.animation) { tl in
                 Canvas { ctx, size in
                     _ = tl.date
-                    g.size = size
+                    let fw = min(size.width * 0.86, size.height * 0.84 * 4 / 3), fh = fw * 3 / 4
+                    let org = CGPoint(x: (size.width - fw) / 2, y: size.height - fh - size.height * 0.07)
+                    g.size = CGSize(width: fw, height: fh); g.origin = org
                     g.tick()
-                    draw(ctx, size)
+                    ctx.stroke(Path(roundedRect: CGRect(origin: org, size: g.size), cornerRadius: 14),
+                               with: .color(Color.white.opacity(0.08)), lineWidth: 2)
+                    var inner = ctx
+                    inner.translateBy(x: org.x, y: org.y)
+                    draw(inner, g.size)
+                    hud(ctx, size)
                 }
             }
             TouchPad(g: g)
@@ -734,6 +746,9 @@ struct PlayView: View {
                 : (t < Tempo.time(46) ? "Слайдер: тапни по началу\nи веди палец за шариком." : "Спиннер: крути палец\nпо кругу вокруг центра!")
             c.draw(Text(hint).font(.system(size: 18, weight: .bold)).foregroundColor(.yellow), at: CGPoint(x: s.width / 2, y: 150))
         }
+    }
+
+    func hud(_ c: GraphicsContext, _ s: CGSize) {
         // HUD
         let ix: CGFloat = s.width > s.height ? 60 : 20
         let w = s.width - 2 * ix
@@ -798,51 +813,59 @@ struct MenuView: View {
     @State var replays = false
     @State var stats = false
     @State var tracks = false
-    var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            Text("NEON BEAT ∞")
-                .font(.system(size: 38, weight: .black, design: .monospaced))
-                .foregroundColor(.cyan).shadow(color: .cyan, radius: 12)
-            Text("Рекорд (\(g.names[g.diff])): \(g.modeBest)").foregroundColor(.gray)
-            Picker("", selection: $g.mode) {
-                Text("Классика").tag(0)
-                Text("Mania").tag(1)
-                Text("Taiko").tag(2)
-                Text("Catch").tag(3)
-            }
-            .pickerStyle(.segmented).padding(.horizontal, 40)
-            Picker("", selection: $g.diff) {
-                ForEach(0..<3) { Text(g.names[$0]).tag($0) }
-            }
-            .pickerStyle(.segmented).padding(.horizontal, 40)
-            Button { g.duel = 0; g.play() } label: { PillText("ИГРАТЬ", filled: true) }
-            if g.mode == 0 {
-            Button { g.start(daily: true) } label: { PillText("ЧЕЛЛЕНДЖ ДНЯ", filled: false) }
-            Button { modsSheet = true } label: { PillText(g.mods.isEmpty ? "МОДЫ" : "МОДЫ (\(g.mods.count))", filled: false) }
-            TextField("Сид (по желанию)", text: $g.seedText)
-                .keyboardType(.numberPad).multilineTextAlignment(.center)
-                .textFieldStyle(.roundedBorder).frame(width: 240)
-            }
-            HStack(spacing: 16) {
-                Button("Как играть") { help = true }
-                Button("Обучение") { g.startTutorial() }
-                Button("Настройки") { settings = true }
-            }.foregroundColor(.gray)
-            HStack(spacing: 16) {
-                Button("Повторы") { replays = true }
-                Button("Статистика") { stats = true }
-                Button("Дуэль") { g.startDuel() }
-                Button("Треки") { tracks = true }
-            }.foregroundColor(.gray)
-            Spacer()
-            Text("v1.7 · треки и новый генератор музыки").font(.caption).foregroundColor(.gray)
+    func chip(_ t: String, _ icon: String, _ a: @escaping () -> Void) -> some View {
+        Button(action: a) {
+            Label(t, systemImage: icon).font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity).padding(.vertical, 11)
+                .background(Color.white.opacity(0.1)).foregroundColor(.white).cornerRadius(12)
         }
-        .sheet(isPresented: $help) { HelpView() }
-        .sheet(isPresented: $settings) { SettingsView(g: g) }
-        .sheet(isPresented: $modsSheet) { ModsView(g: g) }
+    }
+    var body: some View {
+        HStack(spacing: 28) {
+            VStack(spacing: 14) {
+                Text("NEON BEAT ∞")
+                    .font(.system(size: 34, weight: .black, design: .monospaced))
+                    .foregroundColor(.cyan).shadow(color: .cyan, radius: 12)
+                Text("Рекорд (\(g.names[g.diff])): \(g.modeBest)").foregroundColor(.gray)
+                Text("♪ \(Track.all[min(max(g.track, 0), Track.all.count - 1)].name)").font(.footnote).foregroundColor(.pink)
+                Picker("", selection: $g.mode) {
+                    Text("Классика").tag(0)
+                    Text("Mania").tag(1)
+                    Text("Taiko").tag(2)
+                    Text("Catch").tag(3)
+                }.pickerStyle(.segmented)
+                Picker("", selection: $g.diff) {
+                    ForEach(0..<3) { Text(g.names[$0]).tag($0) }
+                }.pickerStyle(.segmented)
+                Button { g.duel = 0; g.play() } label: { PillText("ИГРАТЬ", filled: true) }
+                Text("v1.8 · альбомный режим").font(.caption).foregroundColor(.gray)
+            }
+            .frame(maxWidth: .infinity)
+            ScrollView {
+                VStack(spacing: 10) {
+                    if g.mode == 0 {
+                        chip("Челлендж дня", "calendar") { g.start(daily: true) }
+                        chip(g.mods.isEmpty ? "Моды" : "Моды (\(g.mods.count))", "slider.horizontal.3") { modsSheet = true }
+                        TextField("Сид (по желанию)", text: $g.seedText)
+                            .keyboardType(.numberPad).multilineTextAlignment(.center).textFieldStyle(.roundedBorder)
+                    }
+                    chip("Треки", "music.note.list") { tracks = true }
+                    chip("Дуэль", "person.2") { g.startDuel() }
+                    chip("Повторы", "play.rectangle") { replays = true }
+                    chip("Статистика", "chart.bar") { stats = true }
+                    chip("Обучение", "questionmark.circle") { g.startTutorial() }
+                    chip("Как играть", "book") { help = true }
+                    chip("Настройки", "gearshape") { settings = true }
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 50).padding(.vertical, 20)
+        .sheet(isPresented: $help) { ScrollView { HelpView() } }
+        .sheet(isPresented: $settings) { ScrollView { SettingsView(g: g) } }
+        .sheet(isPresented: $modsSheet) { ScrollView { ModsView(g: g) } }
         .sheet(isPresented: $replays) { ReplaysView(g: g) }
-        .sheet(isPresented: $stats) { StatsView() }
+        .sheet(isPresented: $stats) { ScrollView { StatsView() } }
         .sheet(isPresented: $tracks) { TracksView(g: g) }
     }
 }
@@ -877,9 +900,6 @@ struct SettingsView: View {
             Slider(value: $g.musicVol, in: 0...1)
             Text("Звуки попаданий: \(Int(g.sfxVol * 100))%")
             Slider(value: $g.sfxVol, in: 0...1)
-            Picker("Экран", selection: $g.orient) {
-                Text("Авто").tag(0); Text("Вертикально").tag(1); Text("Горизонтально").tag(2)
-            }.pickerStyle(.segmented)
             Picker("Жанр", selection: $g.genre) {
                 Text("Синтвейв").tag(0); Text("8-бит").tag(1); Text("Хаус").tag(2); Text("Лоу-фай").tag(3)
             }.pickerStyle(.segmented)
@@ -920,30 +940,33 @@ struct ModsView: View {
 struct OverView: View {
     @ObservedObject var g: Game
     var body: some View {
-        VStack(spacing: 16) {
-            Text("ИГРА ОКОНЧЕНА").font(.system(size: 28, weight: .black)).foregroundColor(.white)
-            if g.record {
-                Text("НОВЫЙ РЕКОРД!").font(.system(size: 20, weight: .heavy)).foregroundColor(.yellow)
+        HStack(spacing: 30) {
+            VStack(spacing: 6) {
+                Text("ИГРА ОКОНЧЕНА").font(.system(size: 20, weight: .black)).foregroundColor(.white)
+                Text(g.rank).font(.system(size: 96, weight: .black)).foregroundColor(.yellow)
+                if g.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 18, weight: .heavy)).foregroundColor(.yellow) }
+                Text("\(g.score)").font(.system(size: 44, weight: .black, design: .monospaced)).foregroundColor(.cyan)
+                Text("комбо \(g.maxCombo) · точность \(String(format: "%.1f", g.acc * 100))%").font(.footnote).foregroundColor(.gray)
+                Text("Рекорд (\(g.names[g.diff])): \(g.best) · сид \(g.seed)").font(.caption).foregroundColor(.gray)
             }
-            Text("\(g.score)").font(.system(size: 56, weight: .black, design: .monospaced)).foregroundColor(.cyan)
-            Text("Макс. комбо: \(g.maxCombo)   Точность: \(String(format: "%.1f", g.acc * 100))%")
-                .foregroundColor(.gray)
-            Text("Ранг \(g.rank)").font(.system(size: 34, weight: .black)).foregroundColor(.yellow)
-            Text("Рекорд (\(g.names[g.diff])): \(g.best)").foregroundColor(.gray)
-            Text("Сид карты: \(g.seed)").font(.footnote).foregroundColor(.gray)
-            if g.duel == 1 {
-                Button { g.duelScore = g.score; g.duel = 2; g.seedText = String(g.seed); g.start() } label: { PillText("ХОД ИГРОКА 2", filled: true) }
-            } else if g.duel == 2 {
-                Text(g.duelScore > g.score ? "ПОБЕДИЛ ИГРОК 1" : (g.duelScore < g.score ? "ПОБЕДИЛ ИГРОК 2" : "НИЧЬЯ"))
-                    .font(.system(size: 24, weight: .black)).foregroundColor(.pink)
-                Text("Игрок 1: \(g.duelScore)   Игрок 2: \(g.score)").foregroundColor(.gray)
-            } else {
-                Button { g.start() } label: { PillText("ЕЩЁ РАЗ", filled: true) }
+            .frame(maxWidth: .infinity)
+            VStack(spacing: 10) {
+                if g.duel == 1 {
+                    Button { g.duelScore = g.score; g.duel = 2; g.seedText = String(g.seed); g.start() } label: { PillText("ХОД ИГРОКА 2", filled: true) }
+                } else if g.duel == 2 {
+                    Text(g.duelScore > g.score ? "ПОБЕДИЛ ИГРОК 1" : (g.duelScore < g.score ? "ПОБЕДИЛ ИГРОК 2" : "НИЧЬЯ"))
+                        .font(.system(size: 22, weight: .black)).foregroundColor(.pink)
+                    Text("Игрок 1: \(g.duelScore)   Игрок 2: \(g.score)").foregroundColor(.gray)
+                } else {
+                    Button { g.start() } label: { PillText("ЕЩЁ РАЗ", filled: true) }
+                }
+                Button { g.seedText = String(g.seed); g.start() } label: { PillText("ТА ЖЕ КАРТА", filled: false) }
+                ShareLink(item: cardImage(g), preview: SharePreview("Результат Neon Beat", image: cardImage(g))) { PillText("ПОДЕЛИТЬСЯ", filled: false) }
+                Button { g.duel = 0; g.phase = .menu } label: { PillText("В МЕНЮ", filled: false) }
             }
-            Button { g.seedText = String(g.seed); g.start() } label: { PillText("ТА ЖЕ КАРТА", filled: false) }
-            ShareLink(item: cardImage(g), preview: SharePreview("Результат Neon Beat", image: cardImage(g))) { PillText("ПОДЕЛИТЬСЯ", filled: false) }
-            Button { g.duel = 0; g.phase = .menu } label: { PillText("В МЕНЮ", filled: false) }
+            .frame(maxWidth: .infinity)
         }
+        .padding(30)
     }
 }
 
@@ -960,6 +983,7 @@ final class Mania: ObservableObject {
     var accSum = 0.0, hp = 100.0, record = false
     var flash = [Double](repeating: -9, count: 4)
     var size = CGSize(width: 390, height: 844)
+    var xOff: CGFloat = 0
     init(_ g: Game) { self.g = g }
 
     var now: Double { g.synth.time }
@@ -1073,12 +1097,16 @@ struct ManiaView: View {
             TimelineView(.animation) { tl in
                 Canvas { ctx, size in
                     _ = tl.date
-                    m.size = size
+                    let fw = min(size.width, 460)
+                    m.xOff = (size.width - fw) / 2
+                    m.size = CGSize(width: fw, height: size.height)
                     m.tick()
-                    draw(ctx, size)
+                    var inner = ctx
+                    inner.translateBy(x: m.xOff, y: 0)
+                    draw(inner, m.size)
                 }
             }
-            LanePad { p in m.press(min(3, max(0, Int(p.x / (m.size.width / 4))))) }
+            LanePad { p in m.press(min(3, max(0, Int((p.x - m.xOff) / (m.size.width / 4))))) }
             Button { m.pause() } label: {
                 Image(systemName: "pause.fill").font(.title2)
                     .foregroundColor(.white.opacity(0.7)).padding(20)
@@ -1091,7 +1119,7 @@ struct ManiaView: View {
                     VStack(spacing: 14) {
                         if m.over {
                             Text("ИГРА ОКОНЧЕНА").font(.system(size: 26, weight: .black)).foregroundColor(.white)
-                            Text(m.rank).font(.system(size: 80, weight: .black)).foregroundColor(.yellow)
+                            Text(m.rank).font(.system(size: 52, weight: .black)).foregroundColor(.yellow)
                             if m.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 20, weight: .heavy)).foregroundColor(.yellow) }
                             Text("\(m.score)").font(.system(size: 48, weight: .black, design: .monospaced)).foregroundColor(.cyan)
                             Text("Макс. комбо: \(m.maxCombo)   Точность: \(String(format: "%.1f", m.acc * 100))%")
@@ -1154,10 +1182,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask { AppDelegate.mask }
 }
 func applyOrientation(_ o: Int) {
-    AppDelegate.mask = o == 1 ? .portrait : (o == 2 ? .landscape : .all)
+    AppDelegate.mask = .landscape
     guard let sc = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
     sc.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-    if o != 0 { sc.requestGeometryUpdate(.iOS(interfaceOrientations: o == 1 ? .portrait : .landscape), errorHandler: { _ in }) }
+    sc.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape), errorHandler: { _ in })
 }
 extension Game {
     var modeBest: Int {
@@ -1325,7 +1353,7 @@ struct ArcadeView: View {
                     VStack(spacing: 14) {
                         if a.over {
                             Text("ИГРА ОКОНЧЕНА").font(.system(size: 26, weight: .black)).foregroundColor(.white)
-                            Text(a.rank).font(.system(size: 80, weight: .black)).foregroundColor(.yellow)
+                            Text(a.rank).font(.system(size: 52, weight: .black)).foregroundColor(.yellow)
                             if a.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 20, weight: .heavy)).foregroundColor(.yellow) }
                             Text("\(a.score)").font(.system(size: 48, weight: .black, design: .monospaced)).foregroundColor(.cyan)
                             Text("Макс. комбо: \(a.maxCombo)   Точность: \(String(format: "%.1f", a.acc * 100))%").foregroundColor(.gray)
