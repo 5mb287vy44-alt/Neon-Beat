@@ -93,4 +93,4 @@ jobs:
           VERSION="v1.0.${{ github.run_number }}"
           gh release create "$VERSION" NeonBeat.ipa \
             --title "Neon Beat $VERSION" \
-            --notes "1.1: слайдеры, спиннер, номера на кругах, меню, сложности, иконка"
+            --notes "1.2: моды, ранги, сиды, челлендж дня, скины, вибрация, громкость"
