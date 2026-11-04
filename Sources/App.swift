@@ -42,6 +42,8 @@ final class Synth {
     private var noise: UInt32 = 1
     private var latency = 0.0
     private let arp = [0, 1, 2, 3, 2, 1, 2, 3]
+    private let orders: [[Int]] = [[0, 1, 2, 3], [0, 2, 1, 3], [1, 0, 3, 2], [1, 3, 0, 2]]
+    var genre = 0
     private let roots: [Double] = [55, 43.65, 65.41, 49]
     private let chords: [[Double]] = [
         [220, 261.63, 329.63, 440], [174.61, 220, 261.63, 349.23],
@@ -94,17 +96,18 @@ final class Synth {
             var v = 0.0, h = 0.0
             // кик
             kickPh += twoPi * (45 + 110 * exp(-tb * 30)) / sr
-            v += sin(kickPh) * exp(-tb * 12) * 0.8
+            v += sin(kickPh) * exp(-tb * 12) * (genre == 2 ? 0.95 : (genre == 3 ? 0.5 : 0.8))
             // хэт на доле «и»
             let x = tb - beatLen / 2
-            if x >= 0 {
+            if x >= 0 && genre != 3 {
                 noise = noise &* 1664525 &+ 1013904223
                 let nz = Double(Int32(bitPattern: noise)) / 2147483648.0
-                v += nz * exp(-x * 70) * 0.18
+                v += nz * exp(-x * 70) * (genre == 2 ? 0.26 : 0.18)
             }
-            let chord = (beatIdx / 4) % 4
+            let chord = orders[genre][(beatIdx / 4) % 4]
             // бас
-            v += sin(twoPi * roots[chord] * tb) * exp(-tb * 2.5) * 0.35
+            let bs = sin(twoPi * roots[chord] * tb)
+            v += (genre == 1 ? (bs >= 0 ? 0.18 : -0.18) : bs * 0.35) * exp(-tb * 2.5) * (genre == 2 && x < 0 ? 0.4 : 1)
             // арпеджио (после 16-й доли)
             if beatIdx >= 16 {
                 let half = beatLen / 2
@@ -112,7 +115,8 @@ final class Synth {
                 let te = tb - Double(step) * half
                 let f = chords[chord][arp[(beatIdx * 2 + step) % 8]]
                 let ph = twoPi * f * te
-                v += (sin(ph) + 0.3 * sin(2 * ph)) * exp(-te * 7) * 0.16
+                let wv = genre == 1 ? (sin(ph) >= 0 ? 0.6 : -0.6) : sin(ph) + 0.3 * sin(2 * ph)
+                v += wv * exp(-te * (genre == 3 ? 3.5 : 7)) * (genre == 3 ? 0.1 : 0.16)
             }
             // звук попадания
             if hitT < 0.15 {
@@ -185,12 +189,20 @@ final class Game: ObservableObject {
     var prevAng: Double? = nil
     var ending = false
     var seed: UInt64 = 0, prevCombo = 0, misses = 0
+    var rec = Replay(seed: 0, diff: 1, mods: [], taps: [], frames: [])
+    var replaying = false, replayNext = false, rpTap = 0, rpFrame = 0, lastRec = 0.0
+    var rpPts: [CGPoint] = []
+    @Published var practice = false
+    @Published var tutorial = false
+    @Published var genre = UserDefaults.standard.integer(forKey: "nb_genre") {
+        didSet { UserDefaults.standard.set(genre, forKey: "nb_genre"); synth.genre = genre }
+    }
     var offs: [(Double, Double)] = []
     var flashP = CGPoint(x: 200, y: 400)
     let hapticL = UIImpactFeedbackGenerator(style: .light), hapticH = UIImpactFeedbackGenerator(style: .heavy)
     var size = CGSize(width: 390, height: 844)
 
-    init() { synth.offset = offsetMs / 1000; synth.musicVol = musicVol; synth.sfxVol = sfxVol }
+    init() { synth.genre = genre; synth.offset = offsetMs / 1000; synth.musicVol = musicVol; synth.sfxVol = sfxVol }
 
     func on(_ i: Int) -> Bool { mods.contains(i) }
     func toggleMod(_ i: Int) {
@@ -207,7 +219,7 @@ final class Game: ObservableObject {
         if on(3) { m *= 1.2 }; if on(4) { m *= 0.5 }; if on(5) { m *= 1.06 }; if on(6) { m *= 1.12 }
         return m
     }
-    var hpLoss: Double { missHP[diff] * (on(1) ? 0.5 : (on(2) ? 1.3 : 1)) }
+    var hpLoss: Double { (practice || tutorial) ? 0 : missHP[diff] * (on(1) ? 0.5 : (on(2) ? 1.3 : 1)) }
     var apprMul: Double { on(1) ? 1.3 : (on(2) ? 0.7 : 1) }
     var rank: String {
         if acc >= 0.999 && misses == 0 { return "SS" }
@@ -221,12 +233,15 @@ final class Game: ObservableObject {
     func need(_ n: Note) -> Double { n.dur * 1.4 * 2 * Double.pi }
 
     func start(daily: Bool = false) {
+        replaying = replayNext; replayNext = false; rpTap = 0; rpFrame = 0; lastRec = 0
         notes = []; fx = []; slot = 16; blockUntil = 0; lastT = 0
         if daily { seed = UInt64(Date().timeIntervalSince1970 / 86400) &* 2654435761 }
         else if let v = UInt64(seedText) { seed = v }
+        else if practice || tutorial { seed = 1 }
         else { seed = UInt64.random(in: 1...999_999_999) }
         rng = RNG(s: seed)
-        Tempo.speed = on(3) ? 1.3 : (on(4) ? 0.75 : 1.0)
+        Tempo.speed = on(3) ? 1.3 : ((on(4) || practice || tutorial) ? 0.75 : 1.0)
+        if !replaying { rec = Replay(seed: seed, diff: diff, mods: Array(mods), taps: [], frames: []) }
         Tempo.reset()
         prevCombo = 0; misses = 0; offs = []
         lx = 0.5; ly = 0.5; prevAng = nil
@@ -240,7 +255,7 @@ final class Game: ObservableObject {
     func pause() { guard phase == .playing, !paused else { return }; paused = true; synth.stop() }
     func resume() { paused = false; touches.pts = [:]; synth.resume() }
     func toMenu() {
-        synth.stop(); paused = false
+        synth.stop(); paused = false; tutorial = false; replaying = false
         UIApplication.shared.isIdleTimerDisabled = false
         phase = .menu
     }
@@ -250,8 +265,9 @@ final class Game: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         score = Int(Double(score) * mult)
         let key = "nb_best_\(diff)"
-        record = score > UserDefaults.standard.integer(forKey: key)
+        record = !(practice || tutorial || replaying) && score > UserDefaults.standard.integer(forKey: key)
         if record { UserDefaults.standard.set(score, forKey: key) }
+        if !replaying && !tutorial, let d = try? JSONEncoder().encode(rec) { UserDefaults.standard.set(d, forKey: "nb_replay") }
         phase = .over
     }
 
@@ -339,7 +355,21 @@ final class Game: ObservableObject {
         while Tempo.time(slot / 2) + (slot % 2 == 1 ? Tempo.len(slot / 2) / 2 : 0) < t + 3 {
             spawn(slot); slot += 1
         }
-        let pts = Array(touches.pts.values), rr = radius()
+        if replaying {
+            while rpTap < rec.taps.count, rec.taps[rpTap][0] <= t {
+                let k = rec.taps[rpTap]
+                tap(CGPoint(x: k[1] * size.width, y: k[2] * size.height), at: k[0]); rpTap += 1
+            }
+            while rpFrame + 1 < rec.frames.count, rec.frames[rpFrame + 1][0] <= t { rpFrame += 1 }
+            if rec.frames.isEmpty { rpPts = [] } else {
+                let f = rec.frames[rpFrame]
+                rpPts = stride(from: 1, to: f.count, by: 2).map { CGPoint(x: f[$0] * size.width, y: f[$0 + 1] * size.height) }
+            }
+        } else if t - lastRec >= 0.033 {
+            lastRec = t
+            rec.frames.append([t] + touches.pts.values.flatMap { [Double($0.x / size.width), Double($0.y / size.height)] })
+        }
+        let pts = replaying ? rpPts : Array(touches.pts.values), rr = radius()
         if let p = pts.first { flashP = p }
         if on(8) {
             for i in notes.indices where !notes[i].done && notes[i].kind < 2 && !notes[i].started && t >= notes[i].t {
@@ -380,9 +410,11 @@ final class Game: ObservableObject {
         }
     }
 
-    func tap(_ p: CGPoint) {
+    func tap(_ p: CGPoint, at: Double? = nil) {
         guard phase == .playing, !paused else { return }
-        let t = now, r = radius()
+        if replaying && at == nil { return }
+        let t = at ?? now, r = radius()
+        if !replaying { rec.taps.append([t, Double(p.x / size.width), Double(p.y / size.height)]) }
         var bi = -1
         for i in notes.indices where !notes[i].done && notes[i].kind < 2 && !notes[i].started {
             let dt = notes[i].t - t
@@ -541,6 +573,11 @@ struct PlayView: View {
             c.fill(Path(CGRect(x: x - 1.5, y: by - 7, width: 3, height: 14)),
                    with: .color((o.0 < 0 ? Color.blue : Color.orange).opacity(1 - age / 2)))
         }
+        if g.tutorial {
+            let hint = t < Tempo.time(22) ? "Круг: тапни, когда розовое\nкольцо сожмётся. Цифры: порядок."
+                : (t < Tempo.time(46) ? "Слайдер: тапни по началу\nи веди палец за шариком." : "Спиннер: крути палец\nпо кругу вокруг центра!")
+            c.draw(Text(hint).font(.system(size: 18, weight: .bold)).foregroundColor(.yellow), at: CGPoint(x: s.width / 2, y: 150))
+        }
         // HUD
         let ix: CGFloat = s.width > s.height ? 60 : 20
         let w = s.width - 2 * ix
@@ -628,12 +665,14 @@ struct MenuView: View {
                 .keyboardType(.numberPad).multilineTextAlignment(.center)
                 .textFieldStyle(.roundedBorder).frame(width: 240)
             }
-            HStack(spacing: 30) {
+            HStack(spacing: 16) {
                 Button("Как играть") { help = true }
+                Button("Обучение") { g.startTutorial() }
+                if UserDefaults.standard.data(forKey: "nb_replay") != nil { Button("Повтор") { g.startReplay() } }
                 Button("Настройки") { settings = true }
             }.foregroundColor(.gray)
             Spacer()
-            Text("v1.4 · Mania, Taiko, Catch, поворот экрана в настройках").font(.caption).foregroundColor(.gray)
+            Text("v1.5 · жанры, тренировка, повторы, калибровка, обучение").font(.caption).foregroundColor(.gray)
         }
         .sheet(isPresented: $help) { HelpView() }
         .sheet(isPresented: $settings) { SettingsView(g: g) }
@@ -659,6 +698,7 @@ struct HelpView: View {
 
 struct SettingsView: View {
     @ObservedObject var g: Game
+    @State var cal = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Настройки").font(.title.bold())
@@ -673,6 +713,11 @@ struct SettingsView: View {
             Picker("Экран", selection: $g.orient) {
                 Text("Авто").tag(0); Text("Вертикально").tag(1); Text("Горизонтально").tag(2)
             }.pickerStyle(.segmented)
+            Picker("Жанр", selection: $g.genre) {
+                Text("Синтвейв").tag(0); Text("8-бит").tag(1); Text("Хаус").tag(2); Text("Лоу-фай").tag(3)
+            }.pickerStyle(.segmented)
+            Toggle("Тренировка: 0.75×, без потери HP", isOn: $g.practice)
+            Button("Калибровка звука") { cal = true }.sheet(isPresented: $cal) { CalibView(g: g) }
             Toggle("Вибрация", isOn: $g.vibe)
             Picker("Скин", selection: $g.skin) {
                 ForEach(0..<3) { Text(g.skinNames[$0]).tag($0) }
@@ -946,7 +991,7 @@ extension Game {
     func play() {
         if mode == 1 { applyOrientation(orient); phase = .mania }
         else if mode >= 2 { applyOrientation(orient == 0 ? (mode == 2 ? 2 : 1) : orient); phase = .arcade }
-        else { start() }
+        else { tutorial = false; start() }
     }
 }
 
@@ -1175,6 +1220,66 @@ struct ArcadeView: View {
             c.draw(Text("\(a.combo)x").font(.system(size: 44, weight: .black)).foregroundColor(.white.opacity(0.5)),
                    at: CGPoint(x: W / 2, y: H * 0.22))
         }
+    }
+}
+
+// MARK: - Повторы, обучение, калибровка
+struct Replay: Codable {
+    var seed: UInt64
+    var diff: Int
+    var mods: [Int]
+    var taps: [[Double]]
+    var frames: [[Double]]
+}
+extension Game {
+    func startTutorial() { mode = 0; practice = false; tutorial = true; start() }
+    func startReplay() {
+        guard let d = UserDefaults.standard.data(forKey: "nb_replay"),
+              let r = try? JSONDecoder().decode(Replay.self, from: d) else { return }
+        rec = r; diff = r.diff; mods = Set(r.mods); seedText = String(r.seed)
+        mode = 0; practice = false; tutorial = false; replayNext = true
+        start()
+    }
+}
+
+struct CalibView: View {
+    @ObservedObject var g: Game
+    @State var errs: [Double] = []
+    @State var running = false
+    func tap() {
+        let t = g.now
+        let n = Int((t / 0.6).rounded())
+        guard n >= 2 && n < 16 && abs(t - Tempo.time(n)) < 0.3 else { return }
+        errs.append(t - Tempo.time(n))
+        if errs.count >= 8 { running = false; g.synth.stop() }
+    }
+    var body: some View {
+        VStack(spacing: 18) {
+            Text("Калибровка").font(.title.bold())
+            Text("Нажми «Старт» и тапай по кнопке ровно в момент каждого удара кика. Нужно 8 тапов.")
+                .font(.footnote).foregroundColor(.gray).multilineTextAlignment(.center)
+            if running {
+                Button { tap() } label: {
+                    Text("ТАП").font(.system(size: 40, weight: .black))
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                        .background(Color.cyan.opacity(0.3)).cornerRadius(24)
+                }
+                Text("Тапов: \(errs.count) из 8")
+            } else if errs.count >= 8 {
+                let avg = errs.reduce(0, +) / Double(errs.count) * 1000
+                Text("Средняя ошибка: \(Int(avg)) мс").font(.headline)
+                Button("Применить") { g.offsetMs = max(-200, min(200, g.offsetMs + avg)); errs = [] }
+            }
+            Button(running ? "Стоп" : "Старт") {
+                if running { running = false; g.synth.stop() }
+                else { errs = []; Tempo.speed = 1; Tempo.reset(); try? g.synth.start(); running = true }
+            }
+            .padding(.horizontal, 40).padding(.vertical, 12)
+            .background(Color.cyan).foregroundColor(.black).cornerRadius(14)
+            Spacer()
+        }
+        .padding(24)
+        .onDisappear { g.synth.stop() }
     }
 }
 
