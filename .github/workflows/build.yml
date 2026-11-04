@@ -69,7 +69,7 @@ jobs:
                   GENERATE_INFOPLIST_FILE: YES
                   INFOPLIST_KEY_CFBundleDisplayName: "Neon Beat"
                   INFOPLIST_KEY_UILaunchScreen_Generation: YES
-                  INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
                   CODE_SIGNING_REQUIRED: "NO"
                   CODE_SIGNING_ALLOWED: "NO"
           EOF
@@ -93,4 +93,4 @@ jobs:
           VERSION="v1.0.${{ github.run_number }}"
           gh release create "$VERSION" NeonBeat.ipa \
             --title "Neon Beat $VERSION" \
-            --notes "1.2: моды, ранги, сиды, челлендж дня, скины, вибрация, громкость"
+            --notes "1.4: Mania, Taiko, Catch, поворот экрана"
