@@ -1,0 +1,64 @@
+name: Build IPA & Release
+on: [push, workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.1.app || sudo xcode-select -s /Applications/Xcode_16.2.app || true
+          xcodebuild -version
+
+      - name: Generate Xcode Project
+        run: |
+          brew install xcodegen
+          cat << 'EOF' > project.yml
+          name: NeonBeat
+          options:
+            bundleIdPrefix: com.vibe
+          targets:
+            NeonBeat:
+              type: application
+              platform: iOS
+              deploymentTarget: "16.0"
+              sources:
+                - Sources
+              settings:
+                base:
+                  SWIFT_VERSION: "5.0"
+                  SWIFT_OPTIMIZATION_LEVEL: "-O"
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: "Neon Beat"
+                  INFOPLIST_KEY_UILaunchScreen_Generation: YES
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+                  CODE_SIGNING_REQUIRED: "NO"
+                  CODE_SIGNING_ALLOWED: "NO"
+          EOF
+          xcodegen generate
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' NeonBeat.xcodeproj/project.pbxproj
+
+      - name: Build App (Release)
+        run: |
+          xcodebuild -project NeonBeat.xcodeproj -scheme NeonBeat -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO clean build CONFIGURATION_BUILD_DIR=${{ github.workspace }}/build
+
+      - name: Create IPA
+        run: |
+          mkdir -p Payload
+          mv build/NeonBeat.app Payload/
+          zip -r NeonBeat.ipa Payload
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="v1.0.${{ github.run_number }}"
+          gh release create "$VERSION" NeonBeat.ipa \
+            --title "Neon Beat $VERSION" \
+            --notes "Бесконечная ритм-игра: темп растёт, рекорд сохраняется"
