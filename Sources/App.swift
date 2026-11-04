@@ -139,7 +139,7 @@ struct FX { var x: CGFloat; var y: CGFloat; var born: Double; var kind: Int }
 final class Touches { var pts: [ObjectIdentifier: CGPoint] = [:] }
 
 final class Game: ObservableObject {
-    enum Phase { case menu, playing, over }
+    enum Phase { case menu, playing, over, mania, arcade }
     @Published var phase = Phase.menu
     @Published var paused = false
     @Published var record = false
@@ -156,7 +156,11 @@ final class Game: ObservableObject {
     let skinNames = ["Неон", "Закат", "Лёд"]
     let pals: [[Color]] = [[.cyan, .pink, .yellow, .green], [.orange, .red, .yellow, .pink], [.mint, .blue, .white, .purple]]
     @Published var mods: Set<Int> = []
+    @Published var orient = UserDefaults.standard.integer(forKey: "nb_orient") {
+        didSet { UserDefaults.standard.set(orient, forKey: "nb_orient"); applyOrientation(orient) }
+    }
     @Published var seedText = ""
+    @Published var mode = 0
     @Published var skin = UserDefaults.standard.integer(forKey: "nb_skin") {
         didSet { UserDefaults.standard.set(skin, forKey: "nb_skin") }
     }
@@ -267,7 +271,7 @@ final class Game: ObservableObject {
         }
         guard r < p else { return }
         let dist = min(0.12 + Double(n) * 0.0015, 0.45) * (0.6 + 0.4 * d)
-        lx = min(max(lx + cos(a * 2 * Double.pi) * dist, 0.1), 0.9)
+        lx = min(max(lx + cos(a * 2 * Double.pi) * dist * (size.width > size.height ? 0.55 : 1), 0.1), 0.9)
         ly = min(max(ly + sin(a * 2 * Double.pi) * dist * 0.7, 0.2), 0.82)
         if !half && n >= 24 && k < 0.2 {               // слайдер
             let dur = Tempo.len(n) * (d < 0.5 ? 1 : 2)
@@ -538,17 +542,18 @@ struct PlayView: View {
                    with: .color((o.0 < 0 ? Color.blue : Color.orange).opacity(1 - age / 2)))
         }
         // HUD
-        let w = s.width - 40
-        c.fill(Path(roundedRect: CGRect(x: 20, y: 52, width: w, height: 8), cornerRadius: 4),
+        let ix: CGFloat = s.width > s.height ? 60 : 20
+        let w = s.width - 2 * ix
+        c.fill(Path(roundedRect: CGRect(x: ix, y: 52, width: w, height: 8), cornerRadius: 4),
                with: .color(Color.white.opacity(0.15)))
-        c.fill(Path(roundedRect: CGRect(x: 20, y: 52, width: w * CGFloat(max(0, g.hp) / 100), height: 8), cornerRadius: 4),
+        c.fill(Path(roundedRect: CGRect(x: ix, y: 52, width: w * CGFloat(max(0, g.hp) / 100), height: 8), cornerRadius: 4),
                with: .color(g.hp > 30 ? Color.green : Color.red))
         c.draw(Text("\(g.score)").font(.system(size: 30, weight: .black, design: .monospaced)).foregroundColor(.white),
-               at: CGPoint(x: s.width - 20, y: 86), anchor: .trailing)
+               at: CGPoint(x: s.width - ix, y: 86), anchor: .trailing)
         c.draw(Text(String(format: "%.1f%%", g.acc * 100)).font(.system(size: 16, design: .monospaced)).foregroundColor(.gray),
-               at: CGPoint(x: s.width - 20, y: 114), anchor: .trailing)
+               at: CGPoint(x: s.width - ix, y: 114), anchor: .trailing)
         c.draw(Text("\(g.combo)x").font(.system(size: 38, weight: .black)).foregroundColor(.cyan),
-               at: CGPoint(x: 20, y: s.height - 60), anchor: .leading)
+               at: CGPoint(x: ix, y: s.height - 60), anchor: .leading)
     }
 
     func drawSpinner(_ c: GraphicsContext, _ s: CGSize, _ n: Note, _ t: Double) {
@@ -603,23 +608,32 @@ struct MenuView: View {
             Text("NEON BEAT ∞")
                 .font(.system(size: 38, weight: .black, design: .monospaced))
                 .foregroundColor(.cyan).shadow(color: .cyan, radius: 12)
-            Text("Рекорд (\(g.names[g.diff])): \(g.best)").foregroundColor(.gray)
+            Text("Рекорд (\(g.names[g.diff])): \(g.modeBest)").foregroundColor(.gray)
+            Picker("", selection: $g.mode) {
+                Text("Классика").tag(0)
+                Text("Mania").tag(1)
+                Text("Taiko").tag(2)
+                Text("Catch").tag(3)
+            }
+            .pickerStyle(.segmented).padding(.horizontal, 40)
             Picker("", selection: $g.diff) {
                 ForEach(0..<3) { Text(g.names[$0]).tag($0) }
             }
             .pickerStyle(.segmented).padding(.horizontal, 40)
-            Button { g.start() } label: { PillText("ИГРАТЬ", filled: true) }
+            Button { g.play() } label: { PillText("ИГРАТЬ", filled: true) }
+            if g.mode == 0 {
             Button { g.start(daily: true) } label: { PillText("ЧЕЛЛЕНДЖ ДНЯ", filled: false) }
             Button { modsSheet = true } label: { PillText(g.mods.isEmpty ? "МОДЫ" : "МОДЫ (\(g.mods.count))", filled: false) }
             TextField("Сид (по желанию)", text: $g.seedText)
                 .keyboardType(.numberPad).multilineTextAlignment(.center)
                 .textFieldStyle(.roundedBorder).frame(width: 240)
+            }
             HStack(spacing: 30) {
                 Button("Как играть") { help = true }
                 Button("Настройки") { settings = true }
             }.foregroundColor(.gray)
             Spacer()
-            Text("v1.1 · новые режимы скоро").font(.caption).foregroundColor(.gray)
+            Text("v1.4 · Mania, Taiko, Catch, поворот экрана в настройках").font(.caption).foregroundColor(.gray)
         }
         .sheet(isPresented: $help) { HelpView() }
         .sheet(isPresented: $settings) { SettingsView(g: g) }
@@ -656,6 +670,9 @@ struct SettingsView: View {
             Slider(value: $g.musicVol, in: 0...1)
             Text("Звуки попаданий: \(Int(g.sfxVol * 100))%")
             Slider(value: $g.sfxVol, in: 0...1)
+            Picker("Экран", selection: $g.orient) {
+                Text("Авто").tag(0); Text("Вертикально").tag(1); Text("Горизонтально").tag(2)
+            }.pickerStyle(.segmented)
             Toggle("Вибрация", isOn: $g.vibe)
             Picker("Скин", selection: $g.skin) {
                 ForEach(0..<3) { Text(g.skinNames[$0]).tag($0) }
@@ -710,6 +727,457 @@ struct OverView: View {
     }
 }
 
+// MARK: - Mania: 4 колонки
+final class Mania: ObservableObject {
+    struct N { var t: Double; var lane: Int; var done = false }
+    @Published var over = false
+    @Published var paused = false
+    let g: Game
+    var notes: [N] = [], fx: [(lane: Int, born: Double, kind: Int)] = []
+    var slot = 16, lastLane = 0, ending = false
+    var rng = RNG(s: 1)
+    var score = 0, combo = 0, maxCombo = 0, total = 0, misses = 0
+    var accSum = 0.0, hp = 100.0, record = false
+    var flash = [Double](repeating: -9, count: 4)
+    var size = CGSize(width: 390, height: 844)
+    init(_ g: Game) { self.g = g }
+
+    var now: Double { g.synth.time }
+    var fall: Double { [1.2, 0.95, 0.75][g.diff] }
+    var acc: Double { total == 0 ? 1 : accSum / Double(300 * total) }
+    var rank: String {
+        if acc >= 0.999 && misses == 0 { return "SS" }
+        return acc >= 0.95 ? "S" : (acc >= 0.9 ? "A" : (acc >= 0.8 ? "B" : (acc >= 0.7 ? "C" : "D")))
+    }
+
+    func start() {
+        notes = []; fx = []; slot = 16; lastLane = 0; ending = false
+        rng = RNG(s: UInt64.random(in: 1...999_999_999))
+        score = 0; combo = 0; maxCombo = 0; total = 0; misses = 0; accSum = 0; hp = 100; record = false
+        flash = [Double](repeating: -9, count: 4)
+        Tempo.speed = 1; Tempo.reset()
+        UIApplication.shared.isIdleTimerDisabled = true
+        try? g.synth.start()
+        over = false; paused = false
+    }
+
+    func spawn(_ s: Int) {
+        let n = s / 2, half = s % 2 == 1
+        let base = half ? (n < 40 ? 0 : min(Double(n - 40) / 300, 0.55)) : min(0.6 + Double(n) / 300, 0.92)
+        let p = min(base * g.dens[g.diff], 0.95)
+        let r = rng.unit(), a = rng.unit(), d = rng.unit()
+        guard r < p else { return }
+        let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
+        var lane = Int(a * 4)
+        if lane == lastLane && d < 0.6 { lane = (lane + 1 + Int(d * 10) % 3) % 4 }
+        lastLane = lane
+        notes.append(N(t: t, lane: lane))
+        if !half && n >= 32 && d > 0.8 { notes.append(N(t: t, lane: (lane + 2) % 4)) }
+    }
+
+    func tick() {
+        guard !over, !paused else { return }
+        let t = now
+        while Tempo.time(slot / 2) + (slot % 2 == 1 ? Tempo.len(slot / 2) / 2 : 0) < t + fall + 1 {
+            spawn(slot); slot += 1
+        }
+        for i in notes.indices where !notes[i].done && t > notes[i].t + 0.16 {
+            notes[i].done = true; combo = 0; misses += 1; total += 1
+            hp -= g.missHP[g.diff]
+            fx.append((lane: notes[i].lane, born: t, kind: 0))
+            if g.vibe { g.hapticH.impactOccurred() }
+        }
+        notes.removeAll { $0.done }
+        fx.removeAll { t - $0.born > 0.4 }
+        if hp <= 0 && !ending { ending = true; DispatchQueue.main.async { self.finish() } }
+    }
+
+    func press(_ lane: Int) {
+        guard !over, !paused else { return }
+        let t = now
+        flash[lane] = t
+        var bi = -1
+        for i in notes.indices where !notes[i].done && notes[i].lane == lane {
+            let dt = notes[i].t - t
+            if dt > 0.2 { break }
+            if dt < -0.16 { continue }
+            bi = i; break
+        }
+        guard bi >= 0 else { return }
+        let off = abs(t - notes[bi].t)
+        let kind = off < 0.06 ? 3 : (off < 0.11 ? 2 : 1)
+        let pts = [0, 50, 100, 300][kind]
+        notes[bi].done = true
+        combo += 1; maxCombo = max(maxCombo, combo); total += 1; accSum += Double(pts)
+        score += pts * (1 + combo / 25)
+        hp = min(100, hp + [0, 1, 2, 4][kind])
+        g.synth.hitCounter += 1
+        if g.vibe { g.hapticL.impactOccurred() }
+        fx.append((lane: lane, born: t, kind: kind))
+    }
+
+    func finish() {
+        g.synth.stop(); UIApplication.shared.isIdleTimerDisabled = false
+        let key = "nb_mania_\(g.diff)"
+        record = score > UserDefaults.standard.integer(forKey: key)
+        if record { UserDefaults.standard.set(score, forKey: key) }
+        over = true
+    }
+    func pause() { guard !over, !paused else { return }; paused = true; g.synth.stop() }
+    func resume() { paused = false; g.synth.resume() }
+    func quit() { g.synth.stop(); UIApplication.shared.isIdleTimerDisabled = false; g.phase = .menu }
+}
+
+struct LanePad: UIViewRepresentable {
+    let onDown: (CGPoint) -> Void
+    func makeUIView(context: Context) -> V {
+        let v = V(); v.isMultipleTouchEnabled = true; v.backgroundColor = .clear; v.cb = onDown; return v
+    }
+    func updateUIView(_ v: V, context: Context) { v.cb = onDown }
+    final class V: UIView {
+        var cb: ((CGPoint) -> Void)?
+        override func touchesBegan(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts { cb?(t.location(in: self)) }
+        }
+    }
+}
+
+struct ManiaView: View {
+    let g: Game
+    @StateObject private var m: Mania
+    init(g: Game) { self.g = g; _m = StateObject(wrappedValue: Mania(g)) }
+
+    var body: some View {
+        ZStack {
+            TimelineView(.animation) { tl in
+                Canvas { ctx, size in
+                    _ = tl.date
+                    m.size = size
+                    m.tick()
+                    draw(ctx, size)
+                }
+            }
+            LanePad { p in m.press(min(3, max(0, Int(p.x / (m.size.width / 4))))) }
+            Button { m.pause() } label: {
+                Image(systemName: "pause.fill").font(.title2)
+                    .foregroundColor(.white.opacity(0.7)).padding(20)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.top, 70)
+            if m.paused || m.over {
+                ZStack {
+                    Color.black.opacity(0.78).ignoresSafeArea()
+                    VStack(spacing: 14) {
+                        if m.over {
+                            Text("ИГРА ОКОНЧЕНА").font(.system(size: 26, weight: .black)).foregroundColor(.white)
+                            Text(m.rank).font(.system(size: 80, weight: .black)).foregroundColor(.yellow)
+                            if m.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 20, weight: .heavy)).foregroundColor(.yellow) }
+                            Text("\(m.score)").font(.system(size: 48, weight: .black, design: .monospaced)).foregroundColor(.cyan)
+                            Text("Макс. комбо: \(m.maxCombo)   Точность: \(String(format: "%.1f", m.acc * 100))%")
+                                .foregroundColor(.gray)
+                        } else {
+                            Text("ПАУЗА").font(.system(size: 30, weight: .black)).foregroundColor(.white)
+                            Button { m.resume() } label: { PillText("ПРОДОЛЖИТЬ", filled: true) }
+                        }
+                        Button { m.start() } label: { PillText(m.over ? "ЕЩЁ РАЗ" : "ЗАНОВО", filled: m.over) }
+                        Button { m.quit() } label: { PillText("В МЕНЮ", filled: false) }
+                    }
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .onAppear { m.start() }
+    }
+
+    func draw(_ c: GraphicsContext, _ s: CGSize) {
+        let t = m.now, W = s.width, lw = W / 4, hitY = s.height * 0.82
+        let cols = g.palette
+        for i in 0..<4 {
+            let x = CGFloat(i) * lw
+            let act = max(0, 1 - (t - m.flash[i]) * 6)
+            c.fill(Path(CGRect(x: x, y: 0, width: lw, height: s.height)), with: .color(cols[i].opacity(0.05 + 0.2 * act)))
+            if i > 0 { c.fill(Path(CGRect(x: x - 0.5, y: 0, width: 1, height: s.height)), with: .color(Color.white.opacity(0.12))) }
+        }
+        c.fill(Path(CGRect(x: 0, y: hitY - 2, width: W, height: 4)), with: .color(Color.white.opacity(0.7)))
+        let nh: CGFloat = 26
+        for n in m.notes where !n.done {
+            let y = hitY - CGFloat((n.t - t) / m.fall) * hitY
+            if y < -nh { continue }
+            let rect = CGRect(x: CGFloat(n.lane) * lw + 6, y: y - nh / 2, width: lw - 12, height: nh)
+            c.fill(Path(roundedRect: rect, cornerRadius: 8), with: .color(cols[n.lane]))
+            c.stroke(Path(roundedRect: rect, cornerRadius: 8), with: .color(Color.white.opacity(0.8)), lineWidth: 2)
+        }
+        let jc: [Color] = [.red, .yellow, .green, .cyan]
+        let jt = ["✕", "50", "100", "300"]
+        for f in m.fx {
+            let age = t - f.born
+            c.draw(Text(jt[f.kind]).font(.system(size: 22, weight: .heavy)).foregroundColor(jc[f.kind].opacity(max(0, 1 - age * 2.5))),
+                   at: CGPoint(x: (CGFloat(f.lane) + 0.5) * lw, y: hitY - 40 - CGFloat(age * 40)))
+        }
+        let w = W - 40
+        c.fill(Path(roundedRect: CGRect(x: 20, y: 52, width: w, height: 8), cornerRadius: 4), with: .color(Color.white.opacity(0.15)))
+        c.fill(Path(roundedRect: CGRect(x: 20, y: 52, width: w * CGFloat(max(0, m.hp) / 100), height: 8), cornerRadius: 4),
+               with: .color(m.hp > 30 ? Color.green : Color.red))
+        c.draw(Text("\(m.score)").font(.system(size: 30, weight: .black, design: .monospaced)).foregroundColor(.white),
+               at: CGPoint(x: W - 20, y: 86), anchor: .trailing)
+        if m.combo > 1 {
+            c.draw(Text("\(m.combo)x").font(.system(size: 48, weight: .black)).foregroundColor(.white.opacity(0.55)),
+                   at: CGPoint(x: W / 2, y: s.height * 0.33))
+        }
+    }
+}
+
+// MARK: - Ориентация экрана
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    static var mask: UIInterfaceOrientationMask = .all
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask { AppDelegate.mask }
+}
+func applyOrientation(_ o: Int) {
+    AppDelegate.mask = o == 1 ? .portrait : (o == 2 ? .landscape : .all)
+    guard let sc = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+    sc.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+    if o != 0 { sc.requestGeometryUpdate(.iOS(interfaceOrientations: o == 1 ? .portrait : .landscape), errorHandler: { _ in }) }
+}
+extension Game {
+    var modeBest: Int {
+        let k = ["", "nb_mania_", "nb_taiko_", "nb_catch_"][mode]
+        return mode == 0 ? best : UserDefaults.standard.integer(forKey: "\(k)\(diff)")
+    }
+    func play() {
+        if mode == 1 { applyOrientation(orient); phase = .mania }
+        else if mode >= 2 { applyOrientation(orient == 0 ? (mode == 2 ? 2 : 1) : orient); phase = .arcade }
+        else { start() }
+    }
+}
+
+// MARK: - Taiko (режим 2) и Catch (режим 3)
+final class Arcade: ObservableObject {
+    struct N { var t: Double; var lane: Int; var x = 0.0; var done = false }
+    @Published var over = false
+    @Published var paused = false
+    let g: Game
+    let mode: Int
+    var notes: [N] = [], fx: [(x: CGFloat, y: CGFloat, born: Double, kind: Int)] = []
+    var slot = 16, ending = false, lx = 0.5
+    var rng = RNG(s: 1)
+    var score = 0, combo = 0, maxCombo = 0, total = 0, misses = 0
+    var accSum = 0.0, hp = 100.0, record = false
+    var cx = 0.5, flash = [-9.0, -9.0]
+    var size = CGSize(width: 390, height: 844)
+    init(_ g: Game) { self.g = g; mode = g.mode }
+
+    var now: Double { g.synth.time }
+    var fall: Double { [1.4, 1.1, 0.85][g.diff] }
+    var key: String { (mode == 2 ? "nb_taiko_" : "nb_catch_") + "\(g.diff)" }
+    var acc: Double { total == 0 ? 1 : accSum / Double(300 * total) }
+    var rank: String {
+        if acc >= 0.999 && misses == 0 { return "SS" }
+        return acc >= 0.95 ? "S" : (acc >= 0.9 ? "A" : (acc >= 0.8 ? "B" : (acc >= 0.7 ? "C" : "D")))
+    }
+
+    func start() {
+        notes = []; fx = []; slot = 16; ending = false; lx = 0.5; cx = 0.5
+        rng = RNG(s: UInt64.random(in: 1...999_999_999))
+        score = 0; combo = 0; maxCombo = 0; total = 0; misses = 0; accSum = 0; hp = 100; record = false
+        Tempo.speed = 1; Tempo.reset()
+        UIApplication.shared.isIdleTimerDisabled = true
+        try? g.synth.start()
+        over = false; paused = false
+    }
+
+    func spawn(_ s: Int) {
+        let n = s / 2, half = s % 2 == 1
+        let base = half ? (n < 40 ? 0 : min(Double(n - 40) / 300, 0.55)) : min(0.6 + Double(n) / 300, 0.92)
+        let r = rng.unit(), a = rng.unit(), d = rng.unit()
+        guard r < min(base * g.dens[g.diff], 0.95) else { return }
+        let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
+        lx = min(max(lx + (a - 0.5) * min(0.3 + Double(n) * 0.002, 0.8), 0.08), 0.92)
+        notes.append(N(t: t, lane: d < 0.62 ? 0 : 1, x: lx))
+    }
+
+    func pos(_ n: N) -> CGPoint {
+        mode == 3 ? CGPoint(x: CGFloat(n.x) * size.width, y: size.height * 0.8)
+                  : CGPoint(x: size.width * 0.2, y: size.height * 0.4)
+    }
+    func good(_ i: Int, _ kind: Int, _ t: Double) {
+        let pts = [0, 50, 100, 300][kind], p = pos(notes[i])
+        fx.append((x: p.x, y: p.y, born: t, kind: kind))
+        notes[i].done = true
+        combo += 1; maxCombo = max(maxCombo, combo); total += 1; accSum += Double(pts)
+        score += pts * (1 + combo / 25); hp = min(100, hp + [0, 1, 2, 4][kind])
+        g.synth.hitCounter += 1
+        if g.vibe { g.hapticL.impactOccurred() }
+    }
+    func bad(_ i: Int, _ t: Double) {
+        let p = pos(notes[i])
+        fx.append((x: p.x, y: p.y, born: t, kind: 0))
+        notes[i].done = true
+        combo = 0; misses += 1; total += 1; hp -= g.missHP[g.diff]
+        if g.vibe { g.hapticH.impactOccurred() }
+    }
+
+    func tick() {
+        guard !over, !paused else { return }
+        let t = now
+        while Tempo.time(slot / 2) + (slot % 2 == 1 ? Tempo.len(slot / 2) / 2 : 0) < t + fall + 1 {
+            spawn(slot); slot += 1
+        }
+        for i in notes.indices where !notes[i].done {
+            if mode == 3 {
+                if t >= notes[i].t {
+                    let dx = abs(notes[i].x - cx)
+                    if dx < 0.14 { good(i, dx < 0.06 ? 3 : (dx < 0.10 ? 2 : 1), t) } else { bad(i, t) }
+                }
+            } else if t > notes[i].t + 0.16 { bad(i, t) }
+        }
+        notes.removeAll { $0.done }
+        fx.removeAll { t - $0.born > 0.5 }
+        if hp <= 0 && !ending { ending = true; DispatchQueue.main.async { self.finish() } }
+    }
+
+    func press(_ lane: Int) {
+        guard mode == 2, !over, !paused else { return }
+        let t = now
+        flash[lane] = t
+        guard let i = notes.indices.first(where: { !notes[$0].done && notes[$0].t - t <= 0.2 && notes[$0].t - t >= -0.16 }) else { return }
+        if notes[i].lane != lane { bad(i, t); return }
+        let off = abs(t - notes[i].t)
+        good(i, off < 0.06 ? 3 : (off < 0.11 ? 2 : 1), t)
+    }
+
+    func finish() {
+        g.synth.stop(); UIApplication.shared.isIdleTimerDisabled = false
+        record = score > UserDefaults.standard.integer(forKey: key)
+        if record { UserDefaults.standard.set(score, forKey: key) }
+        over = true
+    }
+    func pause() { guard !over, !paused else { return }; paused = true; g.synth.stop() }
+    func resume() { paused = false; g.synth.resume() }
+    func quit() { g.synth.stop(); UIApplication.shared.isIdleTimerDisabled = false; applyOrientation(0); g.phase = .menu }
+}
+
+struct ArcadePad: UIViewRepresentable {
+    let down: (CGPoint) -> Void
+    let move: (CGPoint) -> Void
+    func makeUIView(context: Context) -> V {
+        let v = V(); v.isMultipleTouchEnabled = true; v.backgroundColor = .clear; v.d = down; v.m = move; return v
+    }
+    func updateUIView(_ v: V, context: Context) { v.d = down; v.m = move }
+    final class V: UIView {
+        var d: ((CGPoint) -> Void)?
+        var m: ((CGPoint) -> Void)?
+        override func touchesBegan(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts { let p = t.location(in: self); d?(p); m?(p) }
+        }
+        override func touchesMoved(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts { m?(t.location(in: self)) }
+        }
+    }
+}
+
+struct ArcadeView: View {
+    let g: Game
+    @StateObject private var a: Arcade
+    init(g: Game) { self.g = g; _a = StateObject(wrappedValue: Arcade(g)) }
+
+    var body: some View {
+        ZStack {
+            TimelineView(.animation) { tl in
+                Canvas { ctx, size in
+                    _ = tl.date
+                    a.size = size
+                    a.tick()
+                    draw(ctx, size)
+                }
+            }
+            ArcadePad(down: { p in a.press(p.x < a.size.width / 2 ? 0 : 1) },
+                      move: { p in if a.mode == 3 { a.cx = min(0.92, max(0.08, Double(p.x / a.size.width))) } })
+            Button { a.pause() } label: {
+                Image(systemName: "pause.fill").font(.title2).foregroundColor(.white.opacity(0.7)).padding(20)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.top, 70)
+            if a.paused || a.over {
+                ZStack {
+                    Color.black.opacity(0.78).ignoresSafeArea()
+                    VStack(spacing: 14) {
+                        if a.over {
+                            Text("ИГРА ОКОНЧЕНА").font(.system(size: 26, weight: .black)).foregroundColor(.white)
+                            Text(a.rank).font(.system(size: 80, weight: .black)).foregroundColor(.yellow)
+                            if a.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 20, weight: .heavy)).foregroundColor(.yellow) }
+                            Text("\(a.score)").font(.system(size: 48, weight: .black, design: .monospaced)).foregroundColor(.cyan)
+                            Text("Макс. комбо: \(a.maxCombo)   Точность: \(String(format: "%.1f", a.acc * 100))%").foregroundColor(.gray)
+                        } else {
+                            Text("ПАУЗА").font(.system(size: 30, weight: .black)).foregroundColor(.white)
+                            Button { a.resume() } label: { PillText("ПРОДОЛЖИТЬ", filled: true) }
+                        }
+                        Button { a.start() } label: { PillText(a.over ? "ЕЩЁ РАЗ" : "ЗАНОВО", filled: a.over) }
+                        Button { a.quit() } label: { PillText("В МЕНЮ", filled: false) }
+                    }
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .onAppear { a.start() }
+    }
+
+    func draw(_ c: GraphicsContext, _ s: CGSize) {
+        let t = a.now, W = s.width, H = s.height, cols = g.palette
+        if a.mode == 2 {
+            let hx = W * 0.2, ty = H * 0.4
+            c.fill(Path(CGRect(x: 0, y: ty - 55, width: W, height: 110)), with: .color(Color.white.opacity(0.06)))
+            c.stroke(Path(ellipseIn: CGRect(x: hx - 40, y: ty - 40, width: 80, height: 80)), with: .color(Color.white.opacity(0.7)), lineWidth: 4)
+            for n in a.notes.reversed() where !n.done {
+                let x = hx + CGFloat((n.t - t) / a.fall) * (W - hx)
+                if x > W + 30 { continue }
+                let col: Color = n.lane == 0 ? .red : .blue
+                let r = CGRect(x: x - 30, y: ty - 30, width: 60, height: 60)
+                c.fill(Path(ellipseIn: r), with: .color(col))
+                c.stroke(Path(ellipseIn: r), with: .color(Color.white), lineWidth: 4)
+            }
+            for i in 0..<2 {
+                let act = max(0, 1 - (t - a.flash[i]) * 6)
+                let rect = CGRect(x: CGFloat(i) * W / 2 + 10, y: H * 0.62, width: W / 2 - 20, height: H * 0.3)
+                let base: Color = i == 0 ? .red : .blue
+                c.fill(Path(roundedRect: rect, cornerRadius: 24), with: .color(base.opacity(0.15 + 0.4 * act)))
+                c.draw(Text(i == 0 ? "ДОН" : "КА").font(.system(size: 30, weight: .black)).foregroundColor(.white.opacity(0.7)),
+                       at: CGPoint(x: rect.midX, y: rect.midY))
+            }
+        } else {
+            let hy = H * 0.8
+            c.fill(Path(CGRect(x: 0, y: hy - 1, width: W, height: 2)), with: .color(Color.white.opacity(0.2)))
+            for n in a.notes.reversed() where !n.done {
+                let y = hy - CGFloat((n.t - t) / a.fall) * hy
+                if y < -20 { continue }
+                let r = CGRect(x: CGFloat(n.x) * W - 16, y: y - 16, width: 32, height: 32)
+                c.fill(Path(ellipseIn: r), with: .color(cols[Int(n.x * 4) % 4]))
+                c.stroke(Path(ellipseIn: r), with: .color(Color.white), lineWidth: 3)
+            }
+            let cw = min(W * 0.28, 150)
+            c.fill(Path(roundedRect: CGRect(x: CGFloat(a.cx) * W - cw / 2, y: hy, width: cw, height: 18), cornerRadius: 9),
+                   with: .color(cols[0]))
+        }
+        let jc: [Color] = [.red, .yellow, .green, .cyan]
+        let jt = ["✕", "50", "100", "300"]
+        for f in a.fx {
+            let age = t - f.born
+            c.draw(Text(jt[f.kind]).font(.system(size: 22, weight: .heavy)).foregroundColor(jc[f.kind].opacity(max(0, 1 - age * 2.5))),
+                   at: CGPoint(x: f.x, y: f.y - 40 - CGFloat(age * 40)))
+        }
+        let ix: CGFloat = W > H ? 60 : 20
+        let w = W - 2 * ix
+        c.fill(Path(roundedRect: CGRect(x: ix, y: 52, width: w, height: 8), cornerRadius: 4), with: .color(Color.white.opacity(0.15)))
+        c.fill(Path(roundedRect: CGRect(x: ix, y: 52, width: w * CGFloat(max(0, a.hp) / 100), height: 8), cornerRadius: 4),
+               with: .color(a.hp > 30 ? Color.green : Color.red))
+        c.draw(Text("\(a.score)").font(.system(size: 30, weight: .black, design: .monospaced)).foregroundColor(.white),
+               at: CGPoint(x: W - ix, y: 86), anchor: .trailing)
+        if a.combo > 1 {
+            c.draw(Text("\(a.combo)x").font(.system(size: 44, weight: .black)).foregroundColor(.white.opacity(0.5)),
+                   at: CGPoint(x: W / 2, y: H * 0.22))
+        }
+    }
+}
+
 struct RootView: View {
     @StateObject var g = Game()
     var body: some View {
@@ -720,6 +1188,8 @@ struct RootView: View {
             case .menu: MenuView(g: g)
             case .playing: PlayView(g: g)
             case .over: OverView(g: g)
+            case .mania: ManiaView(g: g)
+            case .arcade: ArcadeView(g: g)
             }
         }
     }
@@ -727,7 +1197,8 @@ struct RootView: View {
 
 @main
 struct NeonBeatApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     var body: some Scene {
-        WindowGroup { RootView().preferredColorScheme(.dark) }
+        WindowGroup { RootView().preferredColorScheme(.dark).onAppear { applyOrientation(UserDefaults.standard.integer(forKey: "nb_orient")) } }
     }
 }
