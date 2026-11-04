@@ -3,9 +3,11 @@ import AVFoundation
 
 // MARK: - Темп (BPM растёт по ходу игры) — общий для музыки и нот
 enum Tempo {
-    static func bpm(_ n: Int) -> Double { min(100 + Double(n / 16) * 3, 170) }
+    static var speed = 1.0
+    static func bpm(_ n: Int) -> Double { min(100 + Double(n / 16) * 3, 170) * speed }
     static func len(_ n: Int) -> Double { 60 / bpm(n) }
     private static var cache: [Double] = [0]
+    static func reset() { cache = [0] }
     static func time(_ n: Int) -> Double {
         while cache.count <= n { let k = cache.count - 1; cache.append(cache[k] + len(k)) }
         return cache[n]
@@ -47,6 +49,7 @@ final class Synth {
     ]
 
     var offset = 0.0
+    var musicVol = 1.0, sfxVol = 1.0, pulse = 0.0
     var time: Double { Double(samples) / sr - latency - offset }
 
     func start() throws {
@@ -79,14 +82,16 @@ final class Synth {
         let L = bufs[0].mData!.assumingMemoryBound(to: Float.self)
         let R = bufs[1].mData!.assumingMemoryBound(to: Float.self)
         let twoPi = 2 * Double.pi
+        var lastTb = 0.0
         for i in 0..<frames {
             let t = Double(samples + Int64(i)) / sr
             if t >= beatStart + beatLen {
                 beatStart += beatLen; beatIdx += 1; beatLen = Tempo.len(beatIdx)
             }
             let tb = t - beatStart
+            lastTb = tb
             if hitCounter != lastHit { lastHit = hitCounter; hitT = 0 }
-            var v = 0.0
+            var v = 0.0, h = 0.0
             // кик
             kickPh += twoPi * (45 + 110 * exp(-tb * 30)) / sr
             v += sin(kickPh) * exp(-tb * 12) * 0.8
@@ -111,13 +116,14 @@ final class Synth {
             }
             // звук попадания
             if hitT < 0.15 {
-                v += sin(twoPi * 1500 * hitT) * exp(-hitT * 45) * 0.35
+                h += sin(twoPi * 1500 * hitT) * exp(-hitT * 45) * 0.35 * sfxVol
                 hitT += 1 / sr
             }
-            let o = Float(tanh(v * 0.9))
+            let o = Float(tanh((v * musicVol + h) * 0.9))
             L[i] = o; R[i] = o
         }
         samples += Int64(frames)
+        pulse = exp(-lastTb * 7)
     }
 }
 
@@ -145,6 +151,24 @@ final class Game: ObservableObject {
     }
 
     let names = ["Лёгкий", "Обычный", "Сложный"]
+    let modNames = ["No Fail", "Easy", "Hard Rock", "Double Time", "Half Time", "Hidden", "Flashlight", "Sudden Death", "Auto"]
+    let modInfo = ["не вылетаешь", "проще, ×0.5", "сложнее, ×1.1", "быстрее, ×1.2", "медленнее, ×0.5", "круги тают, ×1.06", "видно возле пальца, ×1.12", "промах = конец", "играет сам, без рекорда"]
+    let skinNames = ["Неон", "Закат", "Лёд"]
+    let pals: [[Color]] = [[.cyan, .pink, .yellow, .green], [.orange, .red, .yellow, .pink], [.mint, .blue, .white, .purple]]
+    @Published var mods: Set<Int> = []
+    @Published var seedText = ""
+    @Published var skin = UserDefaults.standard.integer(forKey: "nb_skin") {
+        didSet { UserDefaults.standard.set(skin, forKey: "nb_skin") }
+    }
+    @Published var vibe = !UserDefaults.standard.bool(forKey: "nb_novibe") {
+        didSet { UserDefaults.standard.set(!vibe, forKey: "nb_novibe") }
+    }
+    @Published var musicVol = UserDefaults.standard.object(forKey: "nb_mv") as? Double ?? 1.0 {
+        didSet { synth.musicVol = musicVol; UserDefaults.standard.set(musicVol, forKey: "nb_mv") }
+    }
+    @Published var sfxVol = UserDefaults.standard.object(forKey: "nb_sv") as? Double ?? 1.0 {
+        didSet { synth.sfxVol = sfxVol; UserDefaults.standard.set(sfxVol, forKey: "nb_sv") }
+    }
     let apprK = [1.25, 1.0, 0.8], missHP = [8.0, 12.0, 16.0], dens = [0.8, 1.0, 1.15]
     let synth = Synth()
     let touches = Touches()
@@ -156,19 +180,51 @@ final class Game: ObservableObject {
     var accSum = 0.0, hp = 100.0
     var prevAng: Double? = nil
     var ending = false
+    var seed: UInt64 = 0, prevCombo = 0, misses = 0
+    var offs: [(Double, Double)] = []
+    var flashP = CGPoint(x: 200, y: 400)
+    let hapticL = UIImpactFeedbackGenerator(style: .light), hapticH = UIImpactFeedbackGenerator(style: .heavy)
     var size = CGSize(width: 390, height: 844)
 
-    init() { synth.offset = offsetMs / 1000 }
+    init() { synth.offset = offsetMs / 1000; synth.musicVol = musicVol; synth.sfxVol = sfxVol }
+
+    func on(_ i: Int) -> Bool { mods.contains(i) }
+    func toggleMod(_ i: Int) {
+        if mods.contains(i) { mods.remove(i); return }
+        mods.insert(i)
+        if i == 3 { mods.remove(4) }; if i == 4 { mods.remove(3) }
+        if i == 1 { mods.remove(2) }; if i == 2 { mods.remove(1) }
+    }
+    var palette: [Color] { pals[min(skin, 2)] }
+    var mult: Double {
+        if on(8) { return 0 }
+        var m = 1.0
+        if on(0) { m *= 0.5 }; if on(1) { m *= 0.5 }; if on(2) { m *= 1.1 }
+        if on(3) { m *= 1.2 }; if on(4) { m *= 0.5 }; if on(5) { m *= 1.06 }; if on(6) { m *= 1.12 }
+        return m
+    }
+    var hpLoss: Double { missHP[diff] * (on(1) ? 0.5 : (on(2) ? 1.3 : 1)) }
+    var apprMul: Double { on(1) ? 1.3 : (on(2) ? 0.7 : 1) }
+    var rank: String {
+        if acc >= 0.999 && misses == 0 { return "SS" }
+        return acc >= 0.95 ? "S" : (acc >= 0.9 ? "A" : (acc >= 0.8 ? "B" : (acc >= 0.7 ? "C" : "D")))
+    }
 
     var best: Int { UserDefaults.standard.integer(forKey: "nb_best_\(diff)") }
     var now: Double { synth.time }
     var acc: Double { total == 0 ? 1 : accSum / Double(300 * total) }
-    func radius() -> CGFloat { max(30, min(size.width * 0.11, 46)) }
+    func radius() -> CGFloat { max(30, min(size.width * 0.11, 46)) * (on(1) ? 1.15 : (on(2) ? 0.85 : 1)) }
     func need(_ n: Note) -> Double { n.dur * 1.4 * 2 * Double.pi }
 
-    func start() {
+    func start(daily: Bool = false) {
         notes = []; fx = []; slot = 16; blockUntil = 0; lastT = 0
-        rng = RNG(s: UInt64.random(in: 1...UInt64.max))
+        if daily { seed = UInt64(Date().timeIntervalSince1970 / 86400) &* 2654435761 }
+        else if let v = UInt64(seedText) { seed = v }
+        else { seed = UInt64.random(in: 1...999_999_999) }
+        rng = RNG(s: seed)
+        Tempo.speed = on(3) ? 1.3 : (on(4) ? 0.75 : 1.0)
+        Tempo.reset()
+        prevCombo = 0; misses = 0; offs = []
         lx = 0.5; ly = 0.5; prevAng = nil
         score = 0; combo = 0; maxCombo = 0; total = 0; accSum = 0; hp = 100
         record = false; ending = false; paused = false
@@ -188,6 +244,7 @@ final class Game: ObservableObject {
     func end() {
         synth.stop()
         UIApplication.shared.isIdleTimerDisabled = false
+        score = Int(Double(score) * mult)
         let key = "nb_best_\(diff)"
         record = score > UserDefaults.standard.integer(forKey: key)
         if record { UserDefaults.standard.set(score, forKey: key) }
@@ -201,7 +258,7 @@ final class Game: ObservableObject {
         let r = rng.unit(), a = rng.unit(), d = rng.unit(), k = rng.unit()
         let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
         guard t >= blockUntil else { return }
-        let appr = max(0.45, (0.95 - Double(n) / 400) * apprK[diff])
+        let appr = max(0.45, (0.95 - Double(n) / 400) * apprK[diff] * apprMul)
         if !half && n >= 40 && n % 48 == 0 {          // спиннер
             let dur = Tempo.len(n) * 4
             notes.append(Note(t: t, x: 0.5, y: 0.5, appr: 0.6, kind: 2, dur: dur))
@@ -227,7 +284,7 @@ final class Game: ObservableObject {
 
     func miss(_ i: Int, _ t: Double) {
         notes[i].done = true
-        combo = 0; hp -= missHP[diff]; total += 1
+        combo = 0; hp -= hpLoss; total += 1
         fx.append(FX(x: notes[i].x, y: notes[i].y, born: t, kind: 0))
     }
 
@@ -238,7 +295,7 @@ final class Game: ObservableObject {
             score += 30 * (1 + combo / 25); hp = min(100, hp + 3); synth.hitCounter += 1
             fx.append(FX(x: n.ex, y: n.ey, born: t, kind: 3))
         } else {
-            combo = 0; hp -= missHP[diff] / 2
+            combo = 0; hp -= hpLoss / 2
             fx.append(FX(x: n.ex, y: n.ey, born: t, kind: 0))
         }
     }
@@ -265,7 +322,7 @@ final class Game: ObservableObject {
         } else if q >= 0.5 {
             accSum += 100; score += 100; kind = 2
         } else {
-            combo = 0; hp -= missHP[diff]
+            combo = 0; hp -= hpLoss
         }
         if kind > 0 { synth.hitCounter += 1 }
         fx.append(FX(x: 0.5, y: 0.5, born: t, kind: kind))
@@ -279,6 +336,12 @@ final class Game: ObservableObject {
             spawn(slot); slot += 1
         }
         let pts = Array(touches.pts.values), rr = radius()
+        if let p = pts.first { flashP = p }
+        if on(8) {
+            for i in notes.indices where !notes[i].done && notes[i].kind < 2 && !notes[i].started && t >= notes[i].t {
+                tap(CGPoint(x: notes[i].x * size.width, y: notes[i].y * size.height))
+            }
+        }
         for i in notes.indices where !notes[i].done {
             let n = notes[i]
             if n.kind == 0 {
@@ -290,16 +353,23 @@ final class Game: ObservableObject {
                     let u = CGFloat(min(1, max(0, (t - n.t) / n.dur)))
                     let bx = (n.x + (n.ex - n.x) * u) * size.width
                     let by = (n.y + (n.ey - n.y) * u) * size.height
-                    if pts.contains(where: { hypot($0.x - bx, $0.y - by) < rr * 2.4 }) { notes[i].follow += dt }
+                    if on(8) || pts.contains(where: { hypot($0.x - bx, $0.y - by) < rr * 2.4 }) { notes[i].follow += dt }
                     if t >= n.t + n.dur { finishSlider(i, t) }
                 }
             } else {
-                if t >= n.t && t < n.t + n.dur { spin(i, pts) }
+                if t >= n.t && t < n.t + n.dur { if on(8) { notes[i].spun += need(n) / n.dur * dt * 1.2 } else { spin(i, pts) } }
                 if t >= n.t + n.dur { finishSpinner(i, t) }
             }
         }
         notes.removeAll { $0.done }
         fx.removeAll { t - $0.born > 0.5 }
+        if on(0) { hp = max(hp, 1) }
+        if combo < prevCombo {
+            misses += 1
+            if vibe && !on(8) { hapticH.impactOccurred() }
+            if on(7) { hp = 0 }
+        }
+        prevCombo = combo
         if hp <= 0 && !ending {
             ending = true
             DispatchQueue.main.async { self.end() }
@@ -330,6 +400,8 @@ final class Game: ObservableObject {
         hp = min(100, hp + [0, 1, 2, 4][kind])
         synth.hitCounter += 1
         fx.append(FX(x: notes[bi].x, y: notes[bi].y, born: t, kind: kind))
+        if vibe && !on(8) { hapticL.impactOccurred() }
+        offs.append((t - notes[bi].t, t)); if offs.count > 12 { offs.removeFirst() }
     }
 }
 
@@ -391,13 +463,13 @@ struct PlayView: View {
         .ignoresSafeArea()
     }
 
-    func ball(_ c: GraphicsContext, _ p: CGPoint, _ r: CGFloat, _ a: Double, _ num: Int?, _ k: CGFloat) {
+    func ball(_ c: GraphicsContext, _ p: CGPoint, _ r: CGFloat, _ a: Double, _ num: Int?, _ k: CGFloat, _ col: Color, _ ra: Double) {
         let circle = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
-        c.fill(circle, with: .color(Color.cyan.opacity(0.3 * a)))
-        c.stroke(circle, with: .color(Color.white.opacity(a)), lineWidth: 4)
+        c.fill(circle, with: .color(col.opacity(0.3 * a)))
+        c.stroke(circle, with: .color(col.opacity(a)), lineWidth: 4)
         if k > r {
             let ring = Path(ellipseIn: CGRect(x: p.x - k, y: p.y - k, width: 2 * k, height: 2 * k))
-            c.stroke(ring, with: .color(Color.pink.opacity(a)), lineWidth: 3)
+            c.stroke(ring, with: .color(Color.white.opacity(ra)), lineWidth: 3)
         }
         if let num = num {
             c.draw(Text("\(num)").font(.system(size: r * 0.85, weight: .bold)).foregroundColor(.white.opacity(a)), at: p)
@@ -405,12 +477,13 @@ struct PlayView: View {
     }
 
     func draw(_ c: GraphicsContext, _ s: CGSize) {
-        let t = g.now, r = g.radius()
+        let t = g.now, r = g.radius(), pal = g.palette
+        c.fill(Path(CGRect(origin: .zero, size: s)), with: .color(pal[0].opacity(0.12 * g.synth.pulse)))
         // номера: после потери комбо нумерация начинается заново с 1
-        var nums: [Int: Int] = [:]
+        var nums: [Int: Int] = [:], cix: [Int: Int] = [:]
         var k = 0
         for (i, n) in g.notes.enumerated() where !n.done && n.kind < 2 && !n.started {
-            k += 1; nums[i] = (g.combo + k - 1) % 9 + 1
+            k += 1; nums[i] = (g.combo + k - 1) % 9 + 1; cix[i] = ((g.combo + k - 1) / 9) % 4
         }
         for (i, n) in g.notes.enumerated().reversed() where !n.done {
             let dt = n.t - t
@@ -428,7 +501,7 @@ struct PlayView: View {
                 if n.started {
                     let u = CGFloat(min(1, max(0, (t - n.t) / n.dur)))
                     let b = CGPoint(x: p.x + (q.x - p.x) * u, y: p.y + (q.y - p.y) * u)
-                    ball(c, b, r, 1, nil, 0)
+                    ball(c, b, r, 1, nil, 0, pal[0], 1)
                     let f = r * 2.4
                     c.stroke(Path(ellipseIn: CGRect(x: b.x - f, y: b.y - f, width: 2 * f, height: 2 * f)),
                              with: .color(Color.white.opacity(0.25)), lineWidth: 2)
@@ -438,7 +511,8 @@ struct PlayView: View {
                          with: .color(Color.white.opacity(0.5 * a)), lineWidth: 3)
             }
             let ap = r * (1 + 2.2 * CGFloat(max(0, dt) / n.appr))
-            ball(c, p, r, a, nums[i], ap)
+            let fa = g.on(5) ? a * min(1, max(0, (dt - n.appr * 0.3) / (n.appr * 0.25))) : a
+            ball(c, p, r, fa, nums[i], ap, pal[cix[i] ?? 0], a)
         }
         let cols: [Color] = [.red, .yellow, .green, .cyan]
         let txt = ["✕", "50", "100", "300"]
@@ -447,6 +521,21 @@ struct PlayView: View {
             c.draw(Text(txt[f.kind]).font(.system(size: 22, weight: .heavy))
                     .foregroundColor(cols[f.kind].opacity(max(0, 1 - age * 2))),
                    at: CGPoint(x: f.x * s.width, y: f.y * s.height - CGFloat(age * 40)))
+        }
+        if g.on(6) {
+            var hole = Path(CGRect(origin: .zero, size: s))
+            hole.addEllipse(in: CGRect(x: g.flashP.x - 130, y: g.flashP.y - 130, width: 260, height: 260))
+            c.fill(hole, with: .color(Color.black.opacity(0.93)), style: FillStyle(eoFill: true))
+        }
+        let bx = s.width / 2, by = s.height - 40
+        c.fill(Path(CGRect(x: bx - 80, y: by - 1, width: 160, height: 2)), with: .color(Color.white.opacity(0.25)))
+        c.fill(Path(CGRect(x: bx - 1.5, y: by - 9, width: 3, height: 18)), with: .color(Color.white.opacity(0.6)))
+        for o in g.offs {
+            let age = t - o.1
+            if age > 2 { continue }
+            let x = bx + CGFloat(max(-1, min(1, o.0 / 0.16))) * 80
+            c.fill(Path(CGRect(x: x - 1.5, y: by - 7, width: 3, height: 14)),
+                   with: .color((o.0 < 0 ? Color.blue : Color.orange).opacity(1 - age / 2)))
         }
         // HUD
         let w = s.width - 40
@@ -507,6 +596,7 @@ struct MenuView: View {
     @ObservedObject var g: Game
     @State var help = false
     @State var settings = false
+    @State var modsSheet = false
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -519,13 +609,21 @@ struct MenuView: View {
             }
             .pickerStyle(.segmented).padding(.horizontal, 40)
             Button { g.start() } label: { PillText("ИГРАТЬ", filled: true) }
-            Button { help = true } label: { PillText("КАК ИГРАТЬ", filled: false) }
-            Button { settings = true } label: { PillText("НАСТРОЙКИ", filled: false) }
+            Button { g.start(daily: true) } label: { PillText("ЧЕЛЛЕНДЖ ДНЯ", filled: false) }
+            Button { modsSheet = true } label: { PillText(g.mods.isEmpty ? "МОДЫ" : "МОДЫ (\(g.mods.count))", filled: false) }
+            TextField("Сид (по желанию)", text: $g.seedText)
+                .keyboardType(.numberPad).multilineTextAlignment(.center)
+                .textFieldStyle(.roundedBorder).frame(width: 240)
+            HStack(spacing: 30) {
+                Button("Как играть") { help = true }
+                Button("Настройки") { settings = true }
+            }.foregroundColor(.gray)
             Spacer()
             Text("v1.1 · новые режимы скоро").font(.caption).foregroundColor(.gray)
         }
         .sheet(isPresented: $help) { HelpView() }
         .sheet(isPresented: $settings) { SettingsView(g: g) }
+        .sheet(isPresented: $modsSheet) { ModsView(g: g) }
     }
 }
 
@@ -554,6 +652,36 @@ struct SettingsView: View {
             Slider(value: $g.offsetMs, in: -200...200, step: 5)
             Text("Если круги приходят раньше бита, двигай вправо (+). Если позже, влево (−).")
                 .font(.footnote).foregroundColor(.gray)
+            Text("Музыка: \(Int(g.musicVol * 100))%")
+            Slider(value: $g.musicVol, in: 0...1)
+            Text("Звуки попаданий: \(Int(g.sfxVol * 100))%")
+            Slider(value: $g.sfxVol, in: 0...1)
+            Toggle("Вибрация", isOn: $g.vibe)
+            Picker("Скин", selection: $g.skin) {
+                ForEach(0..<3) { Text(g.skinNames[$0]).tag($0) }
+            }.pickerStyle(.segmented)
+            Spacer()
+        }
+        .padding(24)
+    }
+}
+
+struct ModsView: View {
+    @ObservedObject var g: Game
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Моды").font(.title.bold())
+            ForEach(0..<9) { i in
+                Button { g.toggleMod(i) } label: {
+                    HStack {
+                        Image(systemName: g.on(i) ? "checkmark.circle.fill" : "circle")
+                        Text(g.modNames[i])
+                        Spacer()
+                        Text(g.modInfo[i]).font(.footnote).foregroundColor(.gray)
+                    }
+                }.foregroundColor(.white)
+            }
+            Text("Множитель очков: ×\(String(format: "%.2f", g.mult))").foregroundColor(.cyan)
             Spacer()
         }
         .padding(24)
@@ -571,8 +699,12 @@ struct OverView: View {
             Text("\(g.score)").font(.system(size: 56, weight: .black, design: .monospaced)).foregroundColor(.cyan)
             Text("Макс. комбо: \(g.maxCombo)   Точность: \(String(format: "%.1f", g.acc * 100))%")
                 .foregroundColor(.gray)
+            Text("Ранг \(g.rank)").font(.system(size: 34, weight: .black)).foregroundColor(.yellow)
             Text("Рекорд (\(g.names[g.diff])): \(g.best)").foregroundColor(.gray)
+            Text("Сид карты: \(g.seed)").font(.footnote).foregroundColor(.gray)
             Button { g.start() } label: { PillText("ЕЩЁ РАЗ", filled: true) }
+            Button { g.seedText = String(g.seed); g.start() } label: { PillText("ТА ЖЕ КАРТА", filled: false) }
+            ShareLink(item: "Neon Beat: \(g.score) очков, ранг \(g.rank), сид \(g.seed)") { PillText("ПОДЕЛИТЬСЯ", filled: false) }
             Button { g.phase = .menu } label: { PillText("В МЕНЮ", filled: false) }
         }
     }
