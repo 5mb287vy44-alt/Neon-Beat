@@ -4,7 +4,8 @@ import AVFoundation
 // MARK: - Темп (BPM растёт по ходу игры) — общий для музыки и нот
 enum Tempo {
     static var speed = 1.0
-    static func bpm(_ n: Int) -> Double { min(100 + Double(n / 16) * 3, 170) * speed }
+    static var base = 100.0
+    static func bpm(_ n: Int) -> Double { min(base + Double(n / 16) * 3, base * 1.7) * speed }
     static func len(_ n: Int) -> Double { 60 / bpm(n) }
     private static var cache: [Double] = [0]
     static func reset() { cache = [0] }
@@ -44,6 +45,12 @@ final class Synth {
     private let arp = [0, 1, 2, 3, 2, 1, 2, 3]
     private let orders: [[Int]] = [[0, 1, 2, 3], [0, 2, 1, 3], [1, 0, 3, 2], [1, 3, 0, 2]]
     var genre = 0
+    var trk = Track.all[0], chosen = Track.all[0]
+    var forceBase: Double? = nil
+    private var isPreview = false, previewing = 0
+    private var keepGenre: Int? = nil
+    private var curBar = -1, curStep = -1
+    private var padF = [110.0, 130.0, 165.0], bassF = 55.0, melF = 0.0
     private let roots: [Double] = [55, 43.65, 65.41, 49]
     private let chords: [[Double]] = [
         [220, 261.63, 329.63, 440], [174.61, 220, 261.63, 349.23],
@@ -61,6 +68,9 @@ final class Synth {
         try s.setPreferredIOBufferDuration(0.005)
         try s.setActive(true)
         latency = s.outputLatency + s.ioBufferDuration
+        if isPreview { isPreview = false } else { trk = chosen; if let k = keepGenre { genre = k; keepGenre = nil } }
+        Tempo.base = forceBase ?? trk.bpm; forceBase = nil; Tempo.reset()
+        curBar = -1; curStep = -1
         samples = 0; beatIdx = 0; beatStart = 0; beatLen = Tempo.len(0)
         hitT = 10; lastHit = hitCounter
         if node == nil {
@@ -77,6 +87,39 @@ final class Synth {
     }
 
     func stop() { engine.pause() }
+    func preview(_ tr: Track) {
+        if keepGenre == nil { keepGenre = genre }
+        trk = tr; genre = tr.genre; isPreview = true; Tempo.speed = 1
+        try? start()
+        previewing += 1
+        let id = previewing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+            if let me = self, me.previewing == id { me.stop() }
+        }
+    }
+    private func fq(_ d: Int) -> Double {
+        let oct = Int(floor(Double(d) / 7)), k = ((d % 7) + 7) % 7
+        return trk.root * pow(2, Double(trk.scale[k] + 12 * oct) / 12)
+    }
+    private func hash(_ a: Int, _ b: Int, _ c: Int) -> Double {
+        var z = trk.seed &+ UInt64(truncatingIfNeeded: a) &* 0x9E3779B97F4A7C15 &+ UInt64(truncatingIfNeeded: b) &* 0xBF58476D1CE4E5B9 &+ UInt64(truncatingIfNeeded: c) &* 0x94D049BB133111EB
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        z ^= z >> 31
+        return Double(z >> 11) / 9007199254740992.0
+    }
+    // мелодия: фразы A A B A, повторяются парами и меняются каждые 8 тактов
+    private func melody(_ bar: Int, _ step: Int) -> Int? {
+        let cd = trk.prog[bar % trk.prog.count]
+        let b = bar % 4
+        let sb = (bar / 8) * 10 + (b == 2 ? 1 : 0)
+        if step % 2 == 1 && hash(sb, step, 1) < 0.3 { return nil }
+        if step == 7 && b == 3 && hash(sb, 9, 3) < 0.5 { return nil }
+        let pool = [0, 2, 4, 2, 1, 3, 5, 4]
+        var d = cd + pool[Int(hash(sb, step, 2) * 8) % 8] + 7
+        if b == 1 && step >= 6 { d += 1 }
+        return d
+    }
     func resume() { try? engine.start() }
 
     private func render(_ frames: Int, _ abl: UnsafeMutablePointer<AudioBufferList>) {
@@ -104,19 +147,43 @@ final class Synth {
                 let nz = Double(Int32(bitPattern: noise)) / 2147483648.0
                 v += nz * exp(-x * 70) * (genre == 2 ? 0.26 : 0.18)
             }
-            let chord = orders[genre][(beatIdx / 4) % 4]
+            let bar = beatIdx / 4, bib = beatIdx % 4
+            let half = beatLen / 2
+            if bar != curBar {
+                curBar = bar
+                let cd = trk.prog[bar % trk.prog.count]
+                padF = [fq(cd), fq(cd + 2), fq(cd + 4)]
+                bassF = fq(cd - 7)
+            }
+            // снейр на 2 и 4
+            if bib == 1 || bib == 3 {
+                noise = noise &* 1664525 &+ 1013904223
+                v += Double(Int32(bitPattern: noise)) / 2147483648.0 * exp(-tb * (genre == 1 ? 30 : 16)) * (genre == 3 ? 0.14 : 0.3)
+            }
             // бас
-            let bs = sin(twoPi * roots[chord] * tb)
-            v += (genre == 1 ? (bs >= 0 ? 0.18 : -0.18) : bs * 0.35) * exp(-tb * 2.5) * (genre == 2 && x < 0 ? 0.4 : 1)
-            // арпеджио (после 16-й доли)
-            if beatIdx >= 16 {
-                let half = beatLen / 2
-                let step = tb >= half ? 1 : 0
-                let te = tb - Double(step) * half
-                let f = chords[chord][arp[(beatIdx * 2 + step) % 8]]
-                let ph = twoPi * f * te
-                let wv = genre == 1 ? (sin(ph) >= 0 ? 0.6 : -0.6) : sin(ph) + 0.3 * sin(2 * ph)
-                v += wv * exp(-te * (genre == 3 ? 3.5 : 7)) * (genre == 3 ? 0.1 : 0.16)
+            let bsin = sin(twoPi * bassF * tb)
+            let bw = genre == 1 ? (bsin >= 0 ? 0.5 : -0.5) : bsin
+            v += bw * exp(-(genre == 2 && x >= 0 ? x : tb) * (genre == 2 ? 6 : 2.5)) * 0.32
+            if bar >= 1 {
+                // пэд: аккорд плавно «дышит» в течение такта
+                if genre != 1 {
+                    let pe = sin(Double.pi * (Double(bib) * beatLen + tb) / (4 * beatLen))
+                    v += (sin(twoPi * padF[0] * t) + sin(twoPi * padF[1] * t) + sin(twoPi * padF[2] * t)) * pe * 0.045
+                }
+                // мелодия по восьмым
+                let st = bib * 2 + (tb >= half ? 1 : 0)
+                if st != curStep {
+                    curStep = st; melF = 0
+                    if let d = melody(bar, st) { melF = fq(d) }
+                }
+                if melF > 0 {
+                    let te = tb - (tb >= half ? half : 0)
+                    let ph = twoPi * melF * te
+                    var w = sin(ph) + 0.5 * sin(2 * ph) + 0.3 * sin(3 * ph)
+                    if genre == 1 { w = sin(ph) >= 0 ? 0.6 : -0.6 }
+                    else if genre == 3 { w = sin(ph + 0.3 * sin(twoPi * 5 * te)) }
+                    v += w * exp(-te * (genre == 3 ? 3 : (genre == 2 ? 10 : 6))) * (genre == 3 ? 0.11 : 0.15)
+                }
             }
             // звук попадания
             if hitT < 0.15 {
@@ -201,12 +268,19 @@ final class Game: ObservableObject {
     var offs: [(Double, Double)] = []
     var flashP = CGPoint(x: 200, y: 400)
     var trail: [(CGPoint, Double)] = []
+    @Published var track = UserDefaults.standard.integer(forKey: "nb_track") {
+        didSet {
+            let i = min(max(track, 0), Track.all.count - 1)
+            UserDefaults.standard.set(i, forKey: "nb_track")
+            synth.chosen = Track.all[i]; synth.trk = Track.all[i]; genre = Track.all[i].genre
+        }
+    }
     @Published var duel = 0
     var duelScore = 0
     let hapticL = UIImpactFeedbackGenerator(style: .light), hapticH = UIImpactFeedbackGenerator(style: .heavy)
     var size = CGSize(width: 390, height: 844)
 
-    init() { synth.genre = genre; synth.offset = offsetMs / 1000; synth.musicVol = musicVol; synth.sfxVol = sfxVol }
+    init() { let ti = min(max(track, 0), Track.all.count - 1); synth.chosen = Track.all[ti]; synth.trk = Track.all[ti]; synth.genre = genre; synth.offset = offsetMs / 1000; synth.musicVol = musicVol; synth.sfxVol = sfxVol }
 
     func on(_ i: Int) -> Bool { mods.contains(i) }
     func toggleMod(_ i: Int) {
@@ -451,6 +525,56 @@ final class Game: ObservableObject {
     }
 }
 
+// MARK: - Треки (генерируемые композиции)
+struct Track {
+    var name: String; var genre: Int; var bpm: Double; var root: Double
+    var scale: [Int]; var prog: [Int]; var seed: UInt64
+    static let minor = [0, 2, 3, 5, 7, 8, 10], major = [0, 2, 4, 5, 7, 9, 11], dorian = [0, 2, 3, 5, 7, 9, 10]
+    static let all: [Track] = [
+        Track(name: "Neon Drive", genre: 0, bpm: 100, root: 110, scale: Track.minor, prog: [0, 5, 3, 4], seed: 11),
+        Track(name: "Pixel Rain", genre: 1, bpm: 118, root: 130.81, scale: Track.major, prog: [0, 4, 5, 3], seed: 22),
+        Track(name: "Midnight House", genre: 2, bpm: 122, root: 87.31, scale: Track.minor, prog: [0, 6, 5, 6], seed: 33),
+        Track(name: "Lo-Fi Window", genre: 3, bpm: 82, root: 146.83, scale: Track.dorian, prog: [0, 3, 0, 4], seed: 44),
+        Track(name: "Sunset Run", genre: 0, bpm: 108, root: 82.41, scale: Track.minor, prog: [0, 2, 5, 4], seed: 55),
+        Track(name: "Chip Hero", genre: 1, bpm: 132, root: 98, scale: Track.major, prog: [0, 3, 4, 0], seed: 66),
+        Track(name: "Crystal Cave", genre: 3, bpm: 90, root: 110, scale: Track.major, prog: [0, 5, 3, 4], seed: 77),
+        Track(name: "Club 303", genre: 2, bpm: 126, root: 73.42, scale: Track.minor, prog: [0, 5, 6, 4], seed: 88)
+    ]
+}
+struct TracksView: View {
+    @ObservedObject var g: Game
+    let gn = ["Синтвейв", "8-бит", "Хаус", "Лоу-фай"]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Треки").font(.title.bold())
+            Text("У каждого трека свой темп, тональность, мелодия и стиль. Темп растёт по ходу игры.")
+                .font(.footnote).foregroundColor(.gray)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(0..<Track.all.count, id: \.self) { i in
+                        HStack {
+                            Button { g.track = i } label: {
+                                VStack(alignment: .leading) {
+                                    Text(Track.all[i].name).font(.headline).foregroundColor(.white)
+                                    Text("\(gn[Track.all[i].genre]) · \(Int(Track.all[i].bpm)) BPM").font(.caption).foregroundColor(.gray)
+                                }
+                            }
+                            Spacer()
+                            Button { g.synth.preview(Track.all[i]) } label: {
+                                Image(systemName: "play.circle").font(.title2).foregroundColor(.cyan)
+                            }
+                            Image(systemName: g.track == i ? "checkmark.circle.fill" : "circle").foregroundColor(.cyan)
+                        }
+                        .padding(12).background(Color.white.opacity(0.08)).cornerRadius(12)
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .onDisappear { g.synth.stop() }
+    }
+}
+
 // MARK: - Мультитач: нажатия + положение всех пальцев
 struct TouchPad: UIViewRepresentable {
     let g: Game
@@ -512,6 +636,7 @@ struct PlayView: View {
     func ball(_ c: GraphicsContext, _ p: CGPoint, _ r: CGFloat, _ a: Double, _ num: Int?, _ k: CGFloat, _ col: Color, _ ra: Double) {
         let circle = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
         c.fill(circle, with: .color(col.opacity(0.3 * a)))
+        c.stroke(circle, with: .color(col.opacity(0.22 * a)), lineWidth: 14)
         c.stroke(circle, with: .color(col.opacity(a)), lineWidth: 4)
         if k > r {
             let ring = Path(ellipseIn: CGRect(x: p.x - k, y: p.y - k, width: 2 * k, height: 2 * k))
@@ -582,7 +707,7 @@ struct PlayView: View {
             }
         }
         let cols: [Color] = [.red, .yellow, .green, .cyan]
-        let txt = ["✕", "50", "100", "300"]
+        let txt = ["MISS", "MEH", "OK", "PERFECT"]
         for f in g.fx {
             let age = t - f.born
             c.draw(Text(txt[f.kind]).font(.system(size: 22, weight: .heavy))
@@ -672,6 +797,7 @@ struct MenuView: View {
     @State var modsSheet = false
     @State var replays = false
     @State var stats = false
+    @State var tracks = false
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -707,15 +833,17 @@ struct MenuView: View {
                 Button("Повторы") { replays = true }
                 Button("Статистика") { stats = true }
                 Button("Дуэль") { g.startDuel() }
+                Button("Треки") { tracks = true }
             }.foregroundColor(.gray)
             Spacer()
-            Text("v1.6 · дуэль, статистика, повторы, карточка результата").font(.caption).foregroundColor(.gray)
+            Text("v1.7 · треки и новый генератор музыки").font(.caption).foregroundColor(.gray)
         }
         .sheet(isPresented: $help) { HelpView() }
         .sheet(isPresented: $settings) { SettingsView(g: g) }
         .sheet(isPresented: $modsSheet) { ModsView(g: g) }
         .sheet(isPresented: $replays) { ReplaysView(g: g) }
         .sheet(isPresented: $stats) { StatsView() }
+        .sheet(isPresented: $tracks) { TracksView(g: g) }
     }
 }
 
@@ -1001,7 +1129,7 @@ struct ManiaView: View {
             c.stroke(Path(roundedRect: rect, cornerRadius: 8), with: .color(Color.white.opacity(0.8)), lineWidth: 2)
         }
         let jc: [Color] = [.red, .yellow, .green, .cyan]
-        let jt = ["✕", "50", "100", "300"]
+        let jt = ["MISS", "MEH", "OK", "PERFECT"]
         for f in m.fx {
             let age = t - f.born
             c.draw(Text(jt[f.kind]).font(.system(size: 22, weight: .heavy)).foregroundColor(jc[f.kind].opacity(max(0, 1 - age * 2.5))),
@@ -1252,7 +1380,7 @@ struct ArcadeView: View {
                    with: .color(cols[0]))
         }
         let jc: [Color] = [.red, .yellow, .green, .cyan]
-        let jt = ["✕", "50", "100", "300"]
+        let jt = ["MISS", "MEH", "OK", "PERFECT"]
         for f in a.fx {
             let age = t - f.born
             c.draw(Text(jt[f.kind]).font(.system(size: 22, weight: .heavy)).foregroundColor(jc[f.kind].opacity(max(0, 1 - age * 2.5))),
@@ -1321,7 +1449,7 @@ struct CalibView: View {
             }
             Button(running ? "Стоп" : "Старт") {
                 if running { running = false; g.synth.stop() }
-                else { errs = []; Tempo.speed = 1; Tempo.reset(); try? g.synth.start(); running = true }
+                else { errs = []; Tempo.speed = 1; g.synth.forceBase = 100; try? g.synth.start(); running = true }
             }
             .padding(.horizontal, 40).padding(.vertical, 12)
             .background(Color.cyan).foregroundColor(.black).cornerRadius(14)
@@ -1404,6 +1532,7 @@ enum ReplayStore {
 struct ReplaysView: View {
     @ObservedObject var g: Game
     @State var items = ReplayStore.index
+    @Environment(\.dismiss) var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Повторы").font(.title.bold())
@@ -1412,7 +1541,10 @@ struct ReplaysView: View {
                 VStack(spacing: 10) {
                     ForEach(items) { m in
                         HStack {
-                            Button { if let r = ReplayStore.load(m) { g.watch(r) } } label: {
+                            Button {
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { if let r = ReplayStore.load(m) { g.watch(r) } }
+                            } label: {
                                 VStack(alignment: .leading) {
                                     Text("\(m.rank) · \(m.score) · \(g.names[min(2, m.diff)])").font(.headline).foregroundColor(.white)
                                     Text(m.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundColor(.gray)
