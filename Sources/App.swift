@@ -46,7 +46,8 @@ final class Synth {
         [261.63, 329.63, 392, 523.25], [196, 246.94, 293.66, 392]
     ]
 
-    var time: Double { Double(samples) / sr - latency }
+    var offset = 0.0
+    var time: Double { Double(samples) / sr - latency - offset }
 
     func start() throws {
         if engine.isRunning { engine.pause() }
@@ -71,6 +72,7 @@ final class Synth {
     }
 
     func stop() { engine.pause() }
+    func resume() { try? engine.start() }
 
     private func render(_ frames: Int, _ abl: UnsafeMutablePointer<AudioBufferList>) {
         let bufs = UnsafeMutableAudioBufferListPointer(abl)
@@ -120,71 +122,181 @@ final class Synth {
 }
 
 // MARK: - Игровая логика
-struct Note { var t: Double; var x: CGFloat; var y: CGFloat; var appr: Double; var done = false }
+struct Note {
+    var t: Double; var x: CGFloat; var y: CGFloat; var appr: Double
+    var kind = 0                       // 0 круг, 1 слайдер, 2 спиннер
+    var dur = 0.0; var ex: CGFloat = 0; var ey: CGFloat = 0
+    var started = false; var done = false
+    var follow = 0.0; var spun = 0.0
+}
 struct FX { var x: CGFloat; var y: CGFloat; var born: Double; var kind: Int }
+final class Touches { var pts: [ObjectIdentifier: CGPoint] = [:] }
 
 final class Game: ObservableObject {
     enum Phase { case menu, playing, over }
     @Published var phase = Phase.menu
-    @Published var best = UserDefaults.standard.integer(forKey: "nb_best")
+    @Published var paused = false
     @Published var record = false
+    @Published var diff = UserDefaults.standard.object(forKey: "nb_diff") as? Int ?? 1 {
+        didSet { UserDefaults.standard.set(diff, forKey: "nb_diff") }
+    }
+    @Published var offsetMs = UserDefaults.standard.double(forKey: "nb_off") {
+        didSet { UserDefaults.standard.set(offsetMs, forKey: "nb_off"); synth.offset = offsetMs / 1000 }
+    }
 
+    let names = ["Лёгкий", "Обычный", "Сложный"]
+    let apprK = [1.25, 1.0, 0.8], missHP = [8.0, 12.0, 16.0], dens = [0.8, 1.0, 1.15]
     let synth = Synth()
-    var notes: [Note] = []
-    var fx: [FX] = []
-    var slot = 16
+    let touches = Touches()
+    var notes: [Note] = [], fx: [FX] = []
+    var slot = 16, blockUntil = 0.0, lastT = 0.0
     var rng = RNG(s: 1)
     var lx = 0.5, ly = 0.5
     var score = 0, combo = 0, maxCombo = 0, total = 0
     var accSum = 0.0, hp = 100.0
+    var prevAng: Double? = nil
     var ending = false
     var size = CGSize(width: 390, height: 844)
 
+    init() { synth.offset = offsetMs / 1000 }
+
+    var best: Int { UserDefaults.standard.integer(forKey: "nb_best_\(diff)") }
     var now: Double { synth.time }
     var acc: Double { total == 0 ? 1 : accSum / Double(300 * total) }
     func radius() -> CGFloat { max(30, min(size.width * 0.11, 46)) }
+    func need(_ n: Note) -> Double { n.dur * 1.4 * 2 * Double.pi }
 
     func start() {
-        notes = []; fx = []; slot = 16
+        notes = []; fx = []; slot = 16; blockUntil = 0; lastT = 0
         rng = RNG(s: UInt64.random(in: 1...UInt64.max))
-        lx = 0.5; ly = 0.5
+        lx = 0.5; ly = 0.5; prevAng = nil
         score = 0; combo = 0; maxCombo = 0; total = 0; accSum = 0; hp = 100
-        record = false; ending = false
+        record = false; ending = false; paused = false
         UIApplication.shared.isIdleTimerDisabled = true
         try? synth.start()
         phase = .playing
     }
 
+    func pause() { guard phase == .playing, !paused else { return }; paused = true; synth.stop() }
+    func resume() { paused = false; touches.pts = [:]; synth.resume() }
+    func toMenu() {
+        synth.stop(); paused = false
+        UIApplication.shared.isIdleTimerDisabled = false
+        phase = .menu
+    }
+
     func end() {
         synth.stop()
         UIApplication.shared.isIdleTimerDisabled = false
-        record = score > best
-        if record { best = score; UserDefaults.standard.set(best, forKey: "nb_best") }
+        let key = "nb_best_\(diff)"
+        record = score > UserDefaults.standard.integer(forKey: key)
+        if record { UserDefaults.standard.set(score, forKey: key) }
         phase = .over
     }
 
     func spawn(_ s: Int) {
         let n = s / 2, half = s % 2 == 1
-        let p = half ? (n < 48 ? 0 : min(Double(n - 48) / 400, 0.5)) : min(0.55 + Double(n) / 300, 0.9)
-        let r = rng.unit(), a = rng.unit(), d = rng.unit()
+        let base = half ? (n < 48 ? 0 : min(Double(n - 48) / 400, 0.5)) : min(0.55 + Double(n) / 300, 0.9)
+        let p = min(base * dens[diff], 0.95)
+        let r = rng.unit(), a = rng.unit(), d = rng.unit(), k = rng.unit()
+        let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
+        guard t >= blockUntil else { return }
+        let appr = max(0.45, (0.95 - Double(n) / 400) * apprK[diff])
+        if !half && n >= 40 && n % 48 == 0 {          // спиннер
+            let dur = Tempo.len(n) * 4
+            notes.append(Note(t: t, x: 0.5, y: 0.5, appr: 0.6, kind: 2, dur: dur))
+            blockUntil = t + dur + 0.5; lx = 0.5; ly = 0.5
+            return
+        }
         guard r < p else { return }
         let dist = min(0.12 + Double(n) * 0.0015, 0.45) * (0.6 + 0.4 * d)
         lx = min(max(lx + cos(a * 2 * Double.pi) * dist, 0.1), 0.9)
         ly = min(max(ly + sin(a * 2 * Double.pi) * dist * 0.7, 0.2), 0.82)
-        let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
-        notes.append(Note(t: t, x: CGFloat(lx), y: CGFloat(ly), appr: max(0.5, 0.95 - Double(n) / 400)))
+        if !half && n >= 24 && k < 0.2 {               // слайдер
+            let dur = Tempo.len(n) * (d < 0.5 ? 1 : 2)
+            let ang = (a + 0.5) * 2 * Double.pi
+            let ex = min(max(lx + cos(ang) * 0.3, 0.1), 0.9)
+            let ey = min(max(ly + sin(ang) * 0.2, 0.2), 0.82)
+            notes.append(Note(t: t, x: CGFloat(lx), y: CGFloat(ly), appr: appr, kind: 1,
+                              dur: dur, ex: CGFloat(ex), ey: CGFloat(ey)))
+            lx = ex; ly = ey; blockUntil = t + dur + 0.2
+            return
+        }
+        notes.append(Note(t: t, x: CGFloat(lx), y: CGFloat(ly), appr: appr))
+    }
+
+    func miss(_ i: Int, _ t: Double) {
+        notes[i].done = true
+        combo = 0; hp -= missHP[diff]; total += 1
+        fx.append(FX(x: notes[i].x, y: notes[i].y, born: t, kind: 0))
+    }
+
+    func finishSlider(_ i: Int, _ t: Double) {
+        let n = notes[i]
+        notes[i].done = true
+        if n.follow >= n.dur * 0.7 {
+            score += 30 * (1 + combo / 25); hp = min(100, hp + 3); synth.hitCounter += 1
+            fx.append(FX(x: n.ex, y: n.ey, born: t, kind: 3))
+        } else {
+            combo = 0; hp -= missHP[diff] / 2
+            fx.append(FX(x: n.ex, y: n.ey, born: t, kind: 0))
+        }
+    }
+
+    func spin(_ i: Int, _ pts: [CGPoint]) {
+        let c = CGPoint(x: size.width / 2, y: size.height / 2)
+        guard let p = pts.first, hypot(p.x - c.x, p.y - c.y) > 40 else { prevAng = nil; return }
+        let a = atan2(Double(p.y - c.y), Double(p.x - c.x))
+        if let pa = prevAng {
+            var d = a - pa
+            if d > Double.pi { d -= 2 * Double.pi } else if d < -Double.pi { d += 2 * Double.pi }
+            notes[i].spun += abs(d)
+        }
+        prevAng = a
+    }
+
+    func finishSpinner(_ i: Int, _ t: Double) {
+        let q = notes[i].spun / need(notes[i])
+        notes[i].done = true; prevAng = nil; total += 1
+        var kind = 0
+        if q >= 1 {
+            combo += 1; maxCombo = max(maxCombo, combo); accSum += 300
+            score += 300 * (1 + combo / 25); hp = min(100, hp + 8); kind = 3
+        } else if q >= 0.5 {
+            accSum += 100; score += 100; kind = 2
+        } else {
+            combo = 0; hp -= missHP[diff]
+        }
+        if kind > 0 { synth.hitCounter += 1 }
+        fx.append(FX(x: 0.5, y: 0.5, born: t, kind: kind))
     }
 
     func tick() {
-        guard phase == .playing else { return }
+        guard phase == .playing, !paused else { return }
         let t = now
+        let dt = max(0, min(t - lastT, 0.1)); lastT = t
         while Tempo.time(slot / 2) + (slot % 2 == 1 ? Tempo.len(slot / 2) / 2 : 0) < t + 3 {
             spawn(slot); slot += 1
         }
-        for i in notes.indices where !notes[i].done && t > notes[i].t + 0.16 {
-            notes[i].done = true
-            combo = 0; hp -= 12; total += 1
-            fx.append(FX(x: notes[i].x, y: notes[i].y, born: t, kind: 0))
+        let pts = Array(touches.pts.values), rr = radius()
+        for i in notes.indices where !notes[i].done {
+            let n = notes[i]
+            if n.kind == 0 {
+                if t > n.t + 0.16 { miss(i, t) }
+            } else if n.kind == 1 {
+                if !n.started {
+                    if t > n.t + 0.16 { miss(i, t) }
+                } else {
+                    let u = CGFloat(min(1, max(0, (t - n.t) / n.dur)))
+                    let bx = (n.x + (n.ex - n.x) * u) * size.width
+                    let by = (n.y + (n.ey - n.y) * u) * size.height
+                    if pts.contains(where: { hypot($0.x - bx, $0.y - by) < rr * 2.4 }) { notes[i].follow += dt }
+                    if t >= n.t + n.dur { finishSlider(i, t) }
+                }
+            } else {
+                if t >= n.t && t < n.t + n.dur { spin(i, pts) }
+                if t >= n.t + n.dur { finishSpinner(i, t) }
+            }
         }
         notes.removeAll { $0.done }
         fx.removeAll { t - $0.born > 0.5 }
@@ -195,10 +307,10 @@ final class Game: ObservableObject {
     }
 
     func tap(_ p: CGPoint) {
-        guard phase == .playing else { return }
+        guard phase == .playing, !paused else { return }
         let t = now, r = radius()
         var bi = -1
-        for i in notes.indices where !notes[i].done {
+        for i in notes.indices where !notes[i].done && notes[i].kind < 2 && !notes[i].started {
             let dt = notes[i].t - t
             if dt > 0.25 || dt < -0.16 { continue }
             let dx = notes[i].x * size.width - p.x
@@ -211,7 +323,7 @@ final class Game: ObservableObject {
         let off = abs(t - notes[bi].t)
         let kind = off < 0.06 ? 3 : (off < 0.11 ? 2 : 1)
         let pts = [0, 50, 100, 300][kind]
-        notes[bi].done = true
+        if notes[bi].kind == 1 { notes[bi].started = true } else { notes[bi].done = true }
         combo += 1; maxCombo = max(maxCombo, combo); total += 1
         accSum += Double(pts)
         score += pts * (1 + combo / 25)
@@ -221,26 +333,39 @@ final class Game: ObservableObject {
     }
 }
 
-// MARK: - Тач с мультитачем (чтобы бить двумя пальцами)
+// MARK: - Мультитач: нажатия + положение всех пальцев
 struct TouchPad: UIViewRepresentable {
-    var onTouch: (CGPoint) -> Void
+    let g: Game
     func makeUIView(context: Context) -> PadView {
         let v = PadView()
         v.isMultipleTouchEnabled = true
         v.backgroundColor = .clear
-        v.cb = onTouch
+        v.g = g
         return v
     }
-    func updateUIView(_ v: PadView, context: Context) { v.cb = onTouch }
+    func updateUIView(_ v: PadView, context: Context) { v.g = g }
     final class PadView: UIView {
-        var cb: ((CGPoint) -> Void)?
-        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            for t in touches { cb?(t.location(in: self)) }
+        var g: Game?
+        override func touchesBegan(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts {
+                let p = t.location(in: self)
+                g?.touches.pts[ObjectIdentifier(t)] = p
+                g?.tap(p)
+            }
+        }
+        override func touchesMoved(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts { g?.touches.pts[ObjectIdentifier(t)] = t.location(in: self) }
+        }
+        override func touchesEnded(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts { g?.touches.pts.removeValue(forKey: ObjectIdentifier(t)) }
+        }
+        override func touchesCancelled(_ ts: Set<UITouch>, with e: UIEvent?) {
+            for t in ts { g?.touches.pts.removeValue(forKey: ObjectIdentifier(t)) }
         }
     }
 }
 
-// MARK: - Экраны
+// MARK: - Игровой экран
 struct PlayView: View {
     @ObservedObject var g: Game
 
@@ -254,24 +379,66 @@ struct PlayView: View {
                     draw(ctx, size)
                 }
             }
-            TouchPad { g.tap($0) }
+            TouchPad(g: g)
+            Button { g.pause() } label: {
+                Image(systemName: "pause.fill").font(.title2)
+                    .foregroundColor(.white.opacity(0.7)).padding(20)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .padding(.bottom, 30)
+            if g.paused { PauseView(g: g) }
         }
         .ignoresSafeArea()
     }
 
-    func draw(_ c: GraphicsContext, _ s: CGSize) {
-        let t = g.now, r = g.radius()
-        for n in g.notes.reversed() where !n.done {
-            let dt = n.t - t
-            if dt > n.appr { continue }
-            let p = CGPoint(x: n.x * s.width, y: n.y * s.height)
-            let a = min(1, (n.appr - dt) / 0.25)
-            let circle = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
-            c.fill(circle, with: .color(Color.cyan.opacity(0.25 * a)))
-            c.stroke(circle, with: .color(Color.white.opacity(a)), lineWidth: 4)
-            let k = r * (1 + 2.2 * CGFloat(max(0, dt) / n.appr))
+    func ball(_ c: GraphicsContext, _ p: CGPoint, _ r: CGFloat, _ a: Double, _ num: Int?, _ k: CGFloat) {
+        let circle = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
+        c.fill(circle, with: .color(Color.cyan.opacity(0.3 * a)))
+        c.stroke(circle, with: .color(Color.white.opacity(a)), lineWidth: 4)
+        if k > r {
             let ring = Path(ellipseIn: CGRect(x: p.x - k, y: p.y - k, width: 2 * k, height: 2 * k))
             c.stroke(ring, with: .color(Color.pink.opacity(a)), lineWidth: 3)
+        }
+        if let num = num {
+            c.draw(Text("\(num)").font(.system(size: r * 0.85, weight: .bold)).foregroundColor(.white.opacity(a)), at: p)
+        }
+    }
+
+    func draw(_ c: GraphicsContext, _ s: CGSize) {
+        let t = g.now, r = g.radius()
+        // номера: после потери комбо нумерация начинается заново с 1
+        var nums: [Int: Int] = [:]
+        var k = 0
+        for (i, n) in g.notes.enumerated() where !n.done && n.kind < 2 && !n.started {
+            k += 1; nums[i] = (g.combo + k - 1) % 9 + 1
+        }
+        for (i, n) in g.notes.enumerated().reversed() where !n.done {
+            let dt = n.t - t
+            if n.kind == 2 { drawSpinner(c, s, n, t); continue }
+            if dt > n.appr { continue }
+            let a = min(1, (n.appr - dt) / 0.25)
+            let p = CGPoint(x: n.x * s.width, y: n.y * s.height)
+            if n.kind == 1 {
+                let q = CGPoint(x: n.ex * s.width, y: n.ey * s.height)
+                var path = Path(); path.move(to: p); path.addLine(to: q)
+                c.stroke(path, with: .color(Color.white.opacity(0.35 * a)),
+                         style: StrokeStyle(lineWidth: 2 * r + 4, lineCap: .round))
+                c.stroke(path, with: .color(Color(red: 0.03, green: 0.05, blue: 0.16).opacity(a)),
+                         style: StrokeStyle(lineWidth: 2 * r - 4, lineCap: .round))
+                if n.started {
+                    let u = CGFloat(min(1, max(0, (t - n.t) / n.dur)))
+                    let b = CGPoint(x: p.x + (q.x - p.x) * u, y: p.y + (q.y - p.y) * u)
+                    ball(c, b, r, 1, nil, 0)
+                    let f = r * 2.4
+                    c.stroke(Path(ellipseIn: CGRect(x: b.x - f, y: b.y - f, width: 2 * f, height: 2 * f)),
+                             with: .color(Color.white.opacity(0.25)), lineWidth: 2)
+                    continue
+                }
+                c.stroke(Path(ellipseIn: CGRect(x: q.x - r, y: q.y - r, width: 2 * r, height: 2 * r)),
+                         with: .color(Color.white.opacity(0.5 * a)), lineWidth: 3)
+            }
+            let ap = r * (1 + 2.2 * CGFloat(max(0, dt) / n.appr))
+            ball(c, p, r, a, nums[i], ap)
         }
         let cols: [Color] = [.red, .yellow, .green, .cyan]
         let txt = ["✕", "50", "100", "300"]
@@ -294,25 +461,102 @@ struct PlayView: View {
         c.draw(Text("\(g.combo)x").font(.system(size: 38, weight: .black)).foregroundColor(.cyan),
                at: CGPoint(x: 20, y: s.height - 60), anchor: .leading)
     }
+
+    func drawSpinner(_ c: GraphicsContext, _ s: CGSize, _ n: Note, _ t: Double) {
+        if t < n.t - 0.6 { return }
+        let a = t < n.t ? (t - (n.t - 0.6)) / 0.6 : 1
+        let m = CGPoint(x: s.width / 2, y: s.height / 2)
+        let R = min(s.width, s.height) * 0.38
+        let ring = Path(ellipseIn: CGRect(x: m.x - R, y: m.y - R, width: 2 * R, height: 2 * R))
+        c.stroke(ring, with: .color(Color.white.opacity(0.2 * a)), lineWidth: 10)
+        let q = min(1, n.spun / g.need(n))
+        c.stroke(ring.trimmedPath(from: 0, to: CGFloat(q)), with: .color(Color.cyan.opacity(a)), lineWidth: 10)
+        c.draw(Text("КРУТИ!").font(.system(size: 34, weight: .black)).foregroundColor(.pink.opacity(a)), at: m)
+    }
 }
 
-struct MenuView: View {
+struct PauseView: View {
     @ObservedObject var g: Game
     var body: some View {
-        VStack(spacing: 24) {
+        ZStack {
+            Color.black.opacity(0.75).ignoresSafeArea()
+            VStack(spacing: 18) {
+                Text("ПАУЗА").font(.system(size: 30, weight: .black)).foregroundColor(.white)
+                Button { g.resume() } label: { PillText("ПРОДОЛЖИТЬ", filled: true) }
+                Button { g.start() } label: { PillText("ЗАНОВО", filled: false) }
+                Button { g.toMenu() } label: { PillText("В МЕНЮ", filled: false) }
+            }
+        }
+    }
+}
+
+struct PillText: View {
+    let s: String, filled: Bool
+    init(_ s: String, filled: Bool) { self.s = s; self.filled = filled }
+    var body: some View {
+        Text(s).font(.system(size: 20, weight: .heavy))
+            .frame(width: 240).padding(.vertical, 13)
+            .background(filled ? Color.cyan : Color.white.opacity(0.12))
+            .foregroundColor(filled ? .black : .white)
+            .cornerRadius(14)
+    }
+}
+
+// MARK: - Меню
+struct MenuView: View {
+    @ObservedObject var g: Game
+    @State var help = false
+    @State var settings = false
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
             Text("NEON BEAT ∞")
                 .font(.system(size: 38, weight: .black, design: .monospaced))
                 .foregroundColor(.cyan).shadow(color: .cyan, radius: 12)
-            Text("Рекорд: \(g.best)").foregroundColor(.gray)
-            Button { g.start() } label: {
-                Text("ИГРАТЬ").font(.system(size: 22, weight: .heavy))
-                    .padding(.horizontal, 50).padding(.vertical, 14)
-                    .background(Color.cyan).foregroundColor(.black).cornerRadius(16)
+            Text("Рекорд (\(g.names[g.diff])): \(g.best)").foregroundColor(.gray)
+            Picker("", selection: $g.diff) {
+                ForEach(0..<3) { Text(g.names[$0]).tag($0) }
             }
-            Text("Тапай по кругу, когда розовое кольцо сожмётся до белого. Карта бесконечная: темп растёт, промах отнимает HP. Бей рекорд!")
-                .font(.footnote).foregroundColor(.gray)
-                .multilineTextAlignment(.center).padding(.horizontal, 30)
+            .pickerStyle(.segmented).padding(.horizontal, 40)
+            Button { g.start() } label: { PillText("ИГРАТЬ", filled: true) }
+            Button { help = true } label: { PillText("КАК ИГРАТЬ", filled: false) }
+            Button { settings = true } label: { PillText("НАСТРОЙКИ", filled: false) }
+            Spacer()
+            Text("v1.1 · новые режимы скоро").font(.caption).foregroundColor(.gray)
         }
+        .sheet(isPresented: $help) { HelpView() }
+        .sheet(isPresented: $settings) { SettingsView(g: g) }
+    }
+}
+
+struct HelpView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Как играть").font(.title.bold())
+            Text("● Круг: тапни, когда розовое кольцо сожмётся до круга.")
+            Text("● Слайдер: тапни по началу и веди палец за шариком до конца.")
+            Text("● Спиннер: крути палец по кругу вокруг центра, пока шкала не заполнится.")
+            Text("● Номера на кругах показывают порядок. Промах сбрасывает комбо, и нумерация начинается с 1.")
+            Text("● Промахи отнимают HP. HP кончилось — игра окончена. Темп растёт сам.")
+            Text("● Бить можно двумя пальцами.")
+            Spacer()
+        }
+        .padding(24).frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var g: Game
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Настройки").font(.title.bold())
+            Text("Сдвиг звука: \(Int(g.offsetMs)) мс")
+            Slider(value: $g.offsetMs, in: -200...200, step: 5)
+            Text("Если круги приходят раньше бита, двигай вправо (+). Если позже, влево (−).")
+                .font(.footnote).foregroundColor(.gray)
+            Spacer()
+        }
+        .padding(24)
     }
 }
 
@@ -327,13 +571,9 @@ struct OverView: View {
             Text("\(g.score)").font(.system(size: 56, weight: .black, design: .monospaced)).foregroundColor(.cyan)
             Text("Макс. комбо: \(g.maxCombo)   Точность: \(String(format: "%.1f", g.acc * 100))%")
                 .foregroundColor(.gray)
-            Text("Рекорд: \(g.best)").foregroundColor(.gray)
-            Button { g.start() } label: {
-                Text("ЕЩЁ РАЗ").font(.system(size: 20, weight: .heavy))
-                    .padding(.horizontal, 40).padding(.vertical, 12)
-                    .background(Color.cyan).foregroundColor(.black).cornerRadius(14)
-            }
-            Button("В меню") { g.phase = .menu }.foregroundColor(.gray)
+            Text("Рекорд (\(g.names[g.diff])): \(g.best)").foregroundColor(.gray)
+            Button { g.start() } label: { PillText("ЕЩЁ РАЗ", filled: true) }
+            Button { g.phase = .menu } label: { PillText("В МЕНЮ", filled: false) }
         }
     }
 }
