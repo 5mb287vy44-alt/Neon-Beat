@@ -16,6 +16,37 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.1.app || sudo xcode-select -s /Applications/Xcode_16.2.app || true
           xcodebuild -version
 
+      - name: Generate App Icon
+        run: |
+          mkdir -p Sources/Assets.xcassets/AppIcon.appiconset
+          cat << 'EOF' > Sources/Assets.xcassets/Contents.json
+          { "info" : { "author" : "xcode", "version" : 1 } }
+          EOF
+          cat << 'EOF' > Sources/Assets.xcassets/AppIcon.appiconset/Contents.json
+          { "images" : [ { "idiom" : "universal", "platform" : "ios", "size" : "1024x1024", "filename" : "icon_1024.png" } ], "info" : { "author" : "xcode", "version" : 1 } }
+          EOF
+          python3 - << 'EOF'
+          import math
+          w = 1024
+          px = bytearray(w * w * 3)
+          for y in range(w):
+              for x in range(w):
+                  d = math.hypot(x - 512, y - 512)
+                  i = (y * w + x) * 3
+                  r, g, b = 6, 8 + int(30 * (1 - d / 724)), 30 + int(70 * (1 - d / 724))
+                  if d < 215:
+                      k = 1 - d / 215
+                      r, g, b = 0, int(150 + 80 * k), 255
+                  if 200 <= d < 232:
+                      r, g, b = 255, 255, 255
+                  if 360 <= d < 384:
+                      r, g, b = 255, 60, 160
+                  px[i] = r; px[i+1] = g; px[i+2] = b
+          open('icon.ppm', 'wb').write(f'P6\n{w} {w}\n255\n'.encode() + px)
+          EOF
+          sips -s format png icon.ppm --out Sources/Assets.xcassets/AppIcon.appiconset/icon_1024.png
+          rm icon.ppm
+
       - name: Generate Xcode Project
         run: |
           brew install xcodegen
@@ -34,6 +65,7 @@ jobs:
                 base:
                   SWIFT_VERSION: "5.0"
                   SWIFT_OPTIMIZATION_LEVEL: "-O"
+                  ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                   GENERATE_INFOPLIST_FILE: YES
                   INFOPLIST_KEY_CFBundleDisplayName: "Neon Beat"
                   INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -61,4 +93,4 @@ jobs:
           VERSION="v1.0.${{ github.run_number }}"
           gh release create "$VERSION" NeonBeat.ipa \
             --title "Neon Beat $VERSION" \
-            --notes "Бесконечная ритм-игра: темп растёт, рекорд сохраняется"
+            --notes "1.1: слайдеры, спиннер, номера на кругах, меню, сложности, иконка"
