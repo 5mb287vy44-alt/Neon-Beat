@@ -1,4 +1,4 @@
-import SwiftUl
+import SwiftUI
 import AVFoundation
 
 // MARK: - Темп (BPM растёт по ходу игры) — общий для музыки и нот
