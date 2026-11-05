@@ -37,7 +37,7 @@ final class Synth {
     private var lastHit = 0
     private var hitT = 10.0
     private var beatIdx = 0
-    private var beatStart = 0.0
+    var beatStart = 0.0
     private var beatLen = Tempo.len(0)
     private var kickPh = 0.0
     private var noise: UInt32 = 1
