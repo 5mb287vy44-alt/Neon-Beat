@@ -225,14 +225,18 @@ final class Game: ObservableObject {
     let names = ["Лёгкий", "Обычный", "Сложный"]
     let modNames = ["No Fail", "Easy", "Hard Rock", "Double Time", "Half Time", "Hidden", "Flashlight", "Sudden Death", "Auto"]
     let modInfo = ["не вылетаешь", "проще, ×0.5", "сложнее, ×1.1", "быстрее, ×1.2", "медленнее, ×0.5", "круги тают, ×1.06", "видно возле пальца, ×1.12", "промах = конец", "играет сам, без рекорда"]
-    let skinNames = ["Неон", "Закат", "Лёд"]
-    let pals: [[Color]] = [[.cyan, .pink, .yellow, .green], [.orange, .red, .yellow, .pink], [.mint, .blue, .white, .purple]]
+    let skinNames = ["Неон", "Закат", "Лёд", "Сакура", "Матрица", "Моно"]
+    let pals: [[Color]] = [[.cyan, .pink, .yellow, .green], [.orange, .red, .yellow, .pink], [.mint, .blue, .white, .purple], [.pink, .white, Color(red: 1, green: 0.7, blue: 0.8), .purple], [.green, Color(red: 0.4, green: 1, blue: 0.5), .mint, .white], [.white, .gray, Color(white: 0.8), Color(white: 0.6)]]
     @Published var mods: Set<Int> = []
     @Published var orient = UserDefaults.standard.integer(forKey: "nb_orient") {
         didSet { UserDefaults.standard.set(orient, forKey: "nb_orient"); applyOrientation(orient) }
     }
     @Published var seedText = ""
     @Published var mode = 0
+    @Published var calm = UserDefaults.standard.bool(forKey: "nb_calm") { didSet { UserDefaults.standard.set(calm, forKey: "nb_calm") } }
+    @Published var bg = UserDefaults.standard.integer(forKey: "nb_bg") { didSet { UserDefaults.standard.set(bg, forKey: "nb_bg") } }
+    @Published var shape = UserDefaults.standard.integer(forKey: "nb_shape") { didSet { UserDefaults.standard.set(shape, forKey: "nb_shape") } }
+    var shakeT = -9.0, flashT = -9.0, lastCombo = 0, lastMile = 0
     @Published var skin = UserDefaults.standard.integer(forKey: "nb_skin") {
         didSet { UserDefaults.standard.set(skin, forKey: "nb_skin") }
     }
@@ -290,7 +294,7 @@ final class Game: ObservableObject {
         if i == 3 { mods.remove(4) }; if i == 4 { mods.remove(3) }
         if i == 1 { mods.remove(2) }; if i == 2 { mods.remove(1) }
     }
-    var palette: [Color] { pals[min(skin, 2)] }
+    var palette: [Color] { pals[min(max(skin, 0), pals.count - 1)] }
     var mult: Double {
         if on(8) { return 0 }
         var m = 1.0
@@ -346,7 +350,7 @@ final class Game: ObservableObject {
         let key = "nb_best_\(diff)"
         record = !(practice || tutorial || replaying) && score > UserDefaults.standard.integer(forKey: key)
         if record { UserDefaults.standard.set(score, forKey: key) }
-        Stats.add(score: score, combo: maxCombo, hits: total)
+        Stats.add(score: score, combo: maxCombo, hits: total, rank: rank)
         if !replaying && !tutorial { ReplayStore.add(ReplayMeta(id: UUID().uuidString, date: Date(), score: score, rank: rank, diff: diff), rec) }
         phase = .over
     }
@@ -368,7 +372,7 @@ final class Game: ObservableObject {
         }
         guard r < p else { return }
         let dist = min(0.12 + Double(n) * 0.0015, 0.45) * (0.6 + 0.4 * d) * (stream ? 0.35 : 1)
-        lx = min(max(lx + cos(a * 2 * Double.pi) * dist * 0.75, 0.1), 0.9)
+        lx = min(max(lx + cos(a * 2 * Double.pi) * dist * Double(size.height / size.width) * 1.3, 0.1), 0.9)
         ly = min(max(ly + sin(a * 2 * Double.pi) * dist * 0.7, 0.2), 0.82)
         if !half && n >= 24 && k < 0.2 && !stream {               // слайдер
             let rep = (n >= 64 && k < 0.08) ? 2 : 1
@@ -554,10 +558,10 @@ struct TracksView: View {
                 VStack(spacing: 10) {
                     ForEach(0..<Track.all.count, id: \.self) { i in
                         HStack {
-                            Button { g.track = i } label: {
+                            Button { if g.level >= Track.unlock[i] { g.track = i } } label: {
                                 VStack(alignment: .leading) {
                                     Text(Track.all[i].name).font(.headline).foregroundColor(.white)
-                                    Text("\(gn[Track.all[i].genre]) · \(Int(Track.all[i].bpm)) BPM").font(.caption).foregroundColor(.gray)
+                                    Text("\(gn[Track.all[i].genre]) · \(Int(Track.all[i].bpm)) BPM" + (g.level >= Track.unlock[i] ? "" : " · 🔒 ур. \(Track.unlock[i])")).font(.caption).foregroundColor(.gray)
                                 }
                             }
                             Spacer()
@@ -621,14 +625,13 @@ struct PlayView: View {
             TimelineView(.animation) { tl in
                 Canvas { ctx, size in
                     _ = tl.date
-                    let fw = min(size.width * 0.86, size.height * 0.84 * 4 / 3), fh = fw * 3 / 4
-                    let org = CGPoint(x: (size.width - fw) / 2, y: size.height - fh - size.height * 0.07)
+                    let fw = size.width, fh = size.height
+                    let org = CGPoint.zero
+                    let sh = g.calm ? 0 : max(0, 1 - (g.now - g.shakeT) * 6) * 7
                     g.size = CGSize(width: fw, height: fh); g.origin = org
                     g.tick()
-                    ctx.stroke(Path(roundedRect: CGRect(origin: org, size: g.size), cornerRadius: 14),
-                               with: .color(Color.white.opacity(0.08)), lineWidth: 2)
                     var inner = ctx
-                    inner.translateBy(x: org.x, y: org.y)
+                    inner.translateBy(x: org.x + CGFloat(sin(g.now * 90) * sh), y: org.y)
                     draw(inner, g.size)
                     hud(ctx, size)
                 }
@@ -645,8 +648,17 @@ struct PlayView: View {
         .ignoresSafeArea()
     }
 
+    func diamond(_ p: CGPoint, _ r: CGFloat) -> Path {
+        var d = Path()
+        d.move(to: CGPoint(x: p.x, y: p.y - r * 1.15)); d.addLine(to: CGPoint(x: p.x + r * 1.15, y: p.y))
+        d.addLine(to: CGPoint(x: p.x, y: p.y + r * 1.15)); d.addLine(to: CGPoint(x: p.x - r * 1.15, y: p.y))
+        d.closeSubpath()
+        return d
+    }
+
     func ball(_ c: GraphicsContext, _ p: CGPoint, _ r: CGFloat, _ a: Double, _ num: Int?, _ k: CGFloat, _ col: Color, _ ra: Double) {
-        let circle = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
+        let rect = CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)
+        let circle: Path = g.shape == 1 ? Path(roundedRect: rect, cornerRadius: r * 0.35) : (g.shape == 2 ? diamond(p, r) : Path(ellipseIn: rect))
         c.fill(circle, with: .color(col.opacity(0.3 * a)))
         c.stroke(circle, with: .color(col.opacity(0.22 * a)), lineWidth: 14)
         c.stroke(circle, with: .color(col.opacity(a)), lineWidth: 4)
@@ -661,6 +673,10 @@ struct PlayView: View {
 
     func draw(_ c: GraphicsContext, _ s: CGSize) {
         let t = g.now, r = g.radius(), pal = g.palette
+        if g.combo < g.lastCombo && g.lastCombo >= 8 { g.shakeT = t }
+        g.lastCombo = g.combo
+        if g.combo / 50 > g.lastMile { g.flashT = t }
+        g.lastMile = g.combo / 50
         c.fill(Path(CGRect(origin: .zero, size: s)), with: .color(pal[0].opacity(0.12 * g.synth.pulse)))
         // номера: после потери комбо нумерация начинается заново с 1
         var nums: [Int: Int] = [:], cix: [Int: Int] = [:]
@@ -707,9 +723,9 @@ struct PlayView: View {
         g.trail.removeAll { t - $0.1 > 0.3 }
         for (q, bt) in g.trail {
             let al = 1 - (t - bt) / 0.3, rr = CGFloat(14 * al)
-            c.fill(Path(ellipseIn: CGRect(x: q.x - rr, y: q.y - rr, width: 2 * rr, height: 2 * rr)), with: .color(Color.cyan.opacity(0.35 * al)))
+            c.fill(Path(ellipseIn: CGRect(x: q.x - rr, y: q.y - rr, width: 2 * rr, height: 2 * rr)), with: .color(g.palette[0].opacity(0.35 * al)))
         }
-        for f in g.fx where f.kind > 0 {
+        for f in g.fx where f.kind > 0 && !g.calm {
             let age = t - f.born
             for k in 0..<8 {
                 let ang = Double(k) / 8 * 2 * Double.pi
@@ -749,6 +765,8 @@ struct PlayView: View {
     }
 
     func hud(_ c: GraphicsContext, _ s: CGSize) {
+        let fl = g.calm ? 0 : max(0, 1 - (g.now - g.flashT) * 4)
+        if fl > 0 { c.fill(Path(CGRect(origin: .zero, size: s)), with: .color(Color.white.opacity(0.14 * fl))) }
         // HUD
         let ix: CGFloat = s.width > s.height ? 60 : 20
         let w = s.width - 2 * ix
@@ -805,71 +823,6 @@ struct PillText: View {
 }
 
 // MARK: - Меню
-struct MenuView: View {
-    @ObservedObject var g: Game
-    @State var help = false
-    @State var settings = false
-    @State var modsSheet = false
-    @State var replays = false
-    @State var stats = false
-    @State var tracks = false
-    func chip(_ t: String, _ icon: String, _ a: @escaping () -> Void) -> some View {
-        Button(action: a) {
-            Label(t, systemImage: icon).font(.system(size: 15, weight: .semibold))
-                .frame(maxWidth: .infinity).padding(.vertical, 11)
-                .background(Color.white.opacity(0.1)).foregroundColor(.white).cornerRadius(12)
-        }
-    }
-    var body: some View {
-        HStack(spacing: 28) {
-            VStack(spacing: 14) {
-                Text("NEON BEAT ∞")
-                    .font(.system(size: 34, weight: .black, design: .monospaced))
-                    .foregroundColor(.cyan).shadow(color: .cyan, radius: 12)
-                Text("Рекорд (\(g.names[g.diff])): \(g.modeBest)").foregroundColor(.gray)
-                Text("♪ \(Track.all[min(max(g.track, 0), Track.all.count - 1)].name)").font(.footnote).foregroundColor(.pink)
-                Picker("", selection: $g.mode) {
-                    Text("Классика").tag(0)
-                    Text("Mania").tag(1)
-                    Text("Taiko").tag(2)
-                    Text("Catch").tag(3)
-                }.pickerStyle(.segmented)
-                Picker("", selection: $g.diff) {
-                    ForEach(0..<3) { Text(g.names[$0]).tag($0) }
-                }.pickerStyle(.segmented)
-                Button { g.duel = 0; g.play() } label: { PillText("ИГРАТЬ", filled: true) }
-                Text("v1.8 · альбомный режим").font(.caption).foregroundColor(.gray)
-            }
-            .frame(maxWidth: .infinity)
-            ScrollView {
-                VStack(spacing: 10) {
-                    if g.mode == 0 {
-                        chip("Челлендж дня", "calendar") { g.start(daily: true) }
-                        chip(g.mods.isEmpty ? "Моды" : "Моды (\(g.mods.count))", "slider.horizontal.3") { modsSheet = true }
-                        TextField("Сид (по желанию)", text: $g.seedText)
-                            .keyboardType(.numberPad).multilineTextAlignment(.center).textFieldStyle(.roundedBorder)
-                    }
-                    chip("Треки", "music.note.list") { tracks = true }
-                    chip("Дуэль", "person.2") { g.startDuel() }
-                    chip("Повторы", "play.rectangle") { replays = true }
-                    chip("Статистика", "chart.bar") { stats = true }
-                    chip("Обучение", "questionmark.circle") { g.startTutorial() }
-                    chip("Как играть", "book") { help = true }
-                    chip("Настройки", "gearshape") { settings = true }
-                }
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .padding(.horizontal, 50).padding(.vertical, 20)
-        .sheet(isPresented: $help) { ScrollView { HelpView() } }
-        .sheet(isPresented: $settings) { ScrollView { SettingsView(g: g) } }
-        .sheet(isPresented: $modsSheet) { ScrollView { ModsView(g: g) } }
-        .sheet(isPresented: $replays) { ReplaysView(g: g) }
-        .sheet(isPresented: $stats) { ScrollView { StatsView() } }
-        .sheet(isPresented: $tracks) { TracksView(g: g) }
-    }
-}
-
 struct HelpView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -906,9 +859,7 @@ struct SettingsView: View {
             Toggle("Тренировка: 0.75×, без потери HP", isOn: $g.practice)
             Button("Калибровка звука") { cal = true }.sheet(isPresented: $cal) { CalibView(g: g) }
             Toggle("Вибрация", isOn: $g.vibe)
-            Picker("Скин", selection: $g.skin) {
-                ForEach(0..<3) { Text(g.skinNames[$0]).tag($0) }
-            }.pickerStyle(.segmented)
+            Toggle("Щадящий режим (без вспышек и тряски)", isOn: $g.calm)
             Spacer()
         }
         .padding(24)
@@ -939,13 +890,16 @@ struct ModsView: View {
 
 struct OverView: View {
     @ObservedObject var g: Game
+    @State var pop = false
+    @State var shown = 0
     var body: some View {
         HStack(spacing: 30) {
             VStack(spacing: 6) {
                 Text("ИГРА ОКОНЧЕНА").font(.system(size: 20, weight: .black)).foregroundColor(.white)
                 Text(g.rank).font(.system(size: 96, weight: .black)).foregroundColor(.yellow)
+                    .scaleEffect(pop ? 1 : 2.6).opacity(pop ? 1 : 0)
                 if g.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 18, weight: .heavy)).foregroundColor(.yellow) }
-                Text("\(g.score)").font(.system(size: 44, weight: .black, design: .monospaced)).foregroundColor(.cyan)
+                Text("\(shown)").font(.system(size: 44, weight: .black, design: .monospaced)).foregroundColor(.cyan)
                 Text("комбо \(g.maxCombo) · точность \(String(format: "%.1f", g.acc * 100))%").font(.footnote).foregroundColor(.gray)
                 Text("Рекорд (\(g.names[g.diff])): \(g.best) · сид \(g.seed)").font(.caption).foregroundColor(.gray)
             }
@@ -967,6 +921,8 @@ struct OverView: View {
             .frame(maxWidth: .infinity)
         }
         .padding(30)
+        .onAppear { withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) { pop = true } }
+        .task { for i in 1...30 { shown = g.score * i / 30; try? await Task.sleep(nanoseconds: 30_000_000) } }
     }
 }
 
@@ -1065,7 +1021,7 @@ final class Mania: ObservableObject {
         let key = "nb_mania_\(g.diff)"
         record = score > UserDefaults.standard.integer(forKey: key)
         if record { UserDefaults.standard.set(score, forKey: key) }
-        Stats.add(score: score, combo: maxCombo, hits: total)
+        Stats.add(score: score, combo: maxCombo, hits: total, rank: rank)
         over = true
     }
     func pause() { guard !over, !paused else { return }; paused = true; g.synth.stop() }
@@ -1097,7 +1053,7 @@ struct ManiaView: View {
             TimelineView(.animation) { tl in
                 Canvas { ctx, size in
                     _ = tl.date
-                    let fw = min(size.width, 460)
+                    let fw = min(size.width * 0.7, 620)
                     m.xOff = (size.width - fw) / 2
                     m.size = CGSize(width: fw, height: size.height)
                     m.tick()
@@ -1298,7 +1254,7 @@ final class Arcade: ObservableObject {
         g.synth.stop(); UIApplication.shared.isIdleTimerDisabled = false
         record = score > UserDefaults.standard.integer(forKey: key)
         if record { UserDefaults.standard.set(score, forKey: key) }
-        Stats.add(score: score, combo: maxCombo, hits: total)
+        Stats.add(score: score, combo: maxCombo, hits: total, rank: rank)
         over = true
     }
     func pause() { guard !over, !paused else { return }; paused = true; g.synth.stop() }
@@ -1499,12 +1455,33 @@ extension Note {
 
 // MARK: - Статистика и достижения
 enum Stats {
-    static func add(score: Int, combo: Int, hits: Int) {
-        let d = UserDefaults.standard
+    static let d = UserDefaults.standard
+    static var xp: Int { d.integer(forKey: "st_xp") }
+    static var level: Int { Int(sqrt(Double(xp) / 150)) + 1 }
+    static var xpFrac: Double {
+        let lo = Double((level - 1) * (level - 1) * 150), hi = Double(level * level * 150)
+        return (Double(xp) - lo) / (hi - lo)
+    }
+    static var dayNum: Int {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        return (c.year ?? 0) * 400 + (c.month ?? 0) * 31 + (c.day ?? 0)
+    }
+    static let pool: [(String, Int, String)] = [("Сыграй 3 карты", 3, "games"), ("Набери комбо 50", 50, "combo"),
+        ("Получи ранг A или выше", 1, "rankA"), ("Набери 5000 очков за игру", 5000, "score"), ("Попади 200 раз", 200, "hits")]
+    static var quests: [(String, Int, String)] { [pool[dayNum % 5], pool[(dayNum + 2) % 5], pool[(dayNum + 3) % 5]] }
+    static func prog(_ k: String) -> Int { d.integer(forKey: "q_\(dayNum)_\(k)") }
+    static func bump(_ k: String, _ v: Int, best: Bool = false) {
+        let key = "q_\(dayNum)_\(k)"
+        d.set(best ? max(d.integer(forKey: key), v) : d.integer(forKey: key) + v, forKey: key)
+    }
+    static func add(score: Int, combo: Int, hits: Int, rank: String) {
         d.set(d.integer(forKey: "st_games") + 1, forKey: "st_games")
         d.set(d.integer(forKey: "st_hits") + hits, forKey: "st_hits")
         d.set(max(d.integer(forKey: "st_combo"), combo), forKey: "st_combo")
         d.set(max(d.integer(forKey: "st_score"), score), forKey: "st_score")
+        d.set(xp + score / 25 + hits, forKey: "st_xp")
+        bump("games", 1); bump("hits", hits); bump("combo", combo, best: true); bump("score", score, best: true)
+        if ["SS", "S", "A"].contains(rank) { bump("rankA", 1) }
     }
 }
 struct StatsView: View {
@@ -1519,6 +1496,15 @@ struct StatsView: View {
             Text("Статистика").font(.title.bold())
             Text("Игр: \(games)   Попаданий: \(hits)")
             Text("Лучшее комбо: \(combo)   Лучший счёт: \(score)")
+            Text("Уровень \(Stats.level) · XP \(Stats.xp)").foregroundColor(.pink)
+            Text("Задания дня").font(.headline).padding(.top, 8)
+            ForEach(0..<3, id: \.self) { i in
+                let q = Stats.quests[i], p = Stats.prog(Stats.quests[i].2)
+                HStack {
+                    Image(systemName: p >= q.1 ? "checkmark.circle.fill" : "circle").foregroundColor(p >= q.1 ? .green : .gray)
+                    Text("\(q.0): \(min(p, q.1))/\(q.1)").foregroundColor(.white)
+                }
+            }
             Text("Достижения").font(.headline).padding(.top, 8)
             ForEach(0..<ach.count, id: \.self) { i in
                 HStack {
@@ -1623,12 +1609,204 @@ struct ResultCard: View {
     return Image(uiImage: r.uiImage ?? UIImage())
 }
 
+extension Track { static let unlock = [1, 1, 2, 3, 4, 5, 6, 8] }
+extension Game {
+    var level: Int { Stats.level }
+    var stars: Double {
+        var m = [2.2, 3.6, 5.1][min(diff, 2)] + (Track.all[min(max(track, 0), 7)].bpm - 100) / 40
+        if mods.contains(3) { m += 1 }; if mods.contains(2) { m += 0.6 }
+        if mods.contains(5) { m += 0.3 }; if mods.contains(6) { m += 0.4 }
+        if mods.contains(1) { m -= 0.8 }; if mods.contains(4) { m -= 0.8 }
+        return max(0.5, m)
+    }
+}
+
+// MARK: - Анимированные фоны
+struct Backdrop: View {
+    @ObservedObject var g: Game
+    func h(_ i: Int) -> Double { let x = sin(Double(i) * 12.9898) * 43758.5453; return x - floor(x) }
+    var body: some View {
+        TimelineView(.animation) { tl in
+            Canvas { c, s in
+                let T = tl.date.timeIntervalSinceReferenceDate * (g.calm ? 0.4 : 1)
+                let hue = [0.52, 0.85, 0.75, 0.08, 0.58, 0.33, 0.62, 0.95][min(max(g.track, 0), 7)]
+                let acc = Color(hue: hue, saturation: 0.75, brightness: 1)
+                let live = !g.calm && (g.phase == .playing || g.phase == .mania || g.phase == .arcade)
+                let pulse = live ? max(0, 1 - max(0, g.synth.time - g.synth.beatStart) * 4) : 0
+                c.fill(Path(CGRect(origin: .zero, size: s)),
+                       with: .linearGradient(Gradient(colors: [Color(hue: hue, saturation: 0.8, brightness: 0.18), .black]),
+                                             startPoint: .zero, endPoint: CGPoint(x: 0, y: s.height)))
+                switch g.bg {
+                case 0:
+                    let hy = s.height * 0.55
+                    for i in 0..<12 {
+                        let f = (Double(i) + (T * 0.4).truncatingRemainder(dividingBy: 1)) / 12
+                        c.fill(Path(CGRect(x: 0, y: hy + (s.height - hy) * CGFloat(f * f), width: s.width, height: 1.5)), with: .color(acc.opacity(0.35 * f)))
+                    }
+                    for i in -10...10 {
+                        var p = Path()
+                        p.move(to: CGPoint(x: s.width / 2 + CGFloat(i) * 8, y: hy))
+                        p.addLine(to: CGPoint(x: s.width / 2 + CGFloat(i) * s.width / 8, y: s.height))
+                        c.stroke(p, with: .color(acc.opacity(0.22)), lineWidth: 1)
+                    }
+                    c.fill(Path(ellipseIn: CGRect(x: s.width / 2 - 70, y: hy - 110, width: 140, height: 140)), with: .color(acc.opacity(0.25 + 0.2 * pulse)))
+                case 1:
+                    for i in 0..<70 {
+                        let y = (h(i + 100) * Double(s.height) + T * (6 + 14 * h(i + 200))).truncatingRemainder(dividingBy: Double(s.height))
+                        let r = 1 + 1.6 * h(i + 300)
+                        c.fill(Path(ellipseIn: CGRect(x: h(i) * Double(s.width), y: y, width: r * 2, height: r * 2)), with: .color(Color.white.opacity(0.45 + 0.35 * sin(T * 2 + Double(i)))))
+                    }
+                case 2:
+                    for k in 0..<4 {
+                        var p = Path()
+                        p.move(to: CGPoint(x: 0, y: s.height))
+                        for x in stride(from: 0.0, through: Double(s.width), by: 12) {
+                            p.addLine(to: CGPoint(x: x, y: Double(s.height) * (0.55 + 0.08 * Double(k)) + sin(x / 90 + T * (0.6 + 0.2 * Double(k)) + Double(k)) * (14 + 10 * pulse)))
+                        }
+                        p.addLine(to: CGPoint(x: s.width, y: s.height)); p.closeSubpath()
+                        c.fill(p, with: .color(acc.opacity(0.10 + 0.04 * Double(k))))
+                    }
+                case 3:
+                    for i in 0..<60 {
+                        let y = (h(i + 90) * Double(s.height) + T * (80 + 160 * h(i + 50))).truncatingRemainder(dividingBy: Double(s.height))
+                        c.fill(Path(CGRect(x: h(i) * Double(s.width), y: y, width: 3, height: 14 + 20 * h(i + 7))), with: .color(acc.opacity(0.3)))
+                    }
+                default: break
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Оформление
+struct AppearanceView: View {
+    @ObservedObject var g: Game
+    let bgs = ["Сетка", "Звёзды", "Волны", "Дождь", "Чистый"], shapes = ["Круг", "Квадрат", "Ромб"]
+    let skinLv = [1, 1, 2, 3, 5, 7]
+    func row(_ title: String, _ items: [String], _ sel: Int, _ lock: [Int]?, _ pick: @escaping (Int) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack {
+                    ForEach(0..<items.count, id: \.self) { i in
+                        let ok = lock == nil || g.level >= (lock ?? [])[i]
+                        Button { if ok { pick(i) } } label: {
+                            Text(ok ? items[i] : "🔒 \(items[i])").font(.system(size: 14, weight: .semibold))
+                                .padding(.horizontal, 14).padding(.vertical, 9)
+                                .background(sel == i ? Color.pink : Color.white.opacity(0.1))
+                                .foregroundColor(ok ? .white : .gray).cornerRadius(10)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Оформление").font(.title.bold())
+                row("Фон", bgs, g.bg, nil) { g.bg = $0 }
+                row("Скин (открываются с уровнем)", g.skinNames, g.skin, skinLv) { g.skin = $0 }
+                row("Форма кругов", shapes, g.shape, nil) { g.shape = $0 }
+                Toggle("Щадящий режим: без вспышек, тряски и пульса", isOn: $g.calm)
+                Text("Рекомендуется при светочувствительности.").font(.footnote).foregroundColor(.gray)
+            }
+            .padding(24)
+        }
+    }
+}
+
+// MARK: - Главное меню в духе osu!lazer
+struct MenuView: View {
+    @ObservedObject var g: Game
+    @State var sheet = 0
+    let gn = ["Синтвейв", "8-бит", "Хаус", "Лоу-фай"]
+    var tr: Track { Track.all[min(max(g.track, 0), Track.all.count - 1)] }
+    func icon(_ name: String, _ n: Int) -> some View {
+        Button { sheet = n } label: {
+            Image(systemName: name).font(.system(size: 16, weight: .semibold)).frame(width: 38, height: 38)
+                .background(Color.white.opacity(0.12)).foregroundColor(.white).clipShape(Circle())
+        }
+    }
+    func chip(_ t: String, _ a: @escaping () -> Void) -> some View {
+        Button(action: a) {
+            Text(t).font(.system(size: 12, weight: .bold)).frame(maxWidth: .infinity).padding(.vertical, 8)
+                .background(Color.white.opacity(0.1)).foregroundColor(.white).cornerRadius(9)
+        }
+    }
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                ZStack { Circle().fill(Color.pink); Text("\(Stats.level)").font(.system(size: 16, weight: .black)) }.frame(width: 38, height: 38)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Уровень \(Stats.level)").font(.system(size: 12, weight: .bold))
+                    ProgressView(value: Stats.xpFrac).tint(.pink).frame(width: 110)
+                }
+                Spacer()
+                Text("NEON BEAT ∞").font(.system(size: 22, weight: .black, design: .monospaced)).foregroundColor(.pink).shadow(color: .pink, radius: 8)
+                Spacer()
+                icon("paintpalette", 6); icon("play.rectangle", 4); icon("chart.bar", 5); icon("questionmark.circle", 1); icon("gearshape", 2)
+            }
+            .padding(.horizontal, 24).padding(.top, 8)
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(tr.name).font(.system(size: 24, weight: .heavy)).lineLimit(1)
+                    Text("\(gn[tr.genre]) · \(Int(tr.bpm)) BPM · " + String(format: "★ %.1f", g.stars)).font(.footnote).foregroundColor(.pink)
+                    Text("Рекорд: \(g.modeBest)").font(.caption).foregroundColor(.gray)
+                    Picker("", selection: $g.mode) {
+                        Text("Классика").tag(0)
+                        Text("Mania").tag(1)
+                        Text("Taiko").tag(2)
+                        Text("Catch").tag(3)
+                    }.pickerStyle(.segmented)
+                    Picker("", selection: $g.diff) { ForEach(0..<3) { Text(g.names[$0]).tag($0) } }.pickerStyle(.segmented)
+                    HStack(spacing: 6) {
+                        if g.mode == 0 { chip(g.mods.isEmpty ? "Моды" : "Моды \(g.mods.count)") { sheet = 3 } }
+                        if g.mode == 0 { chip("Челлендж") { g.start(daily: true) } }
+                        chip("Дуэль") { g.startDuel() }
+                        if g.mode == 0 { chip("Обучение") { g.startTutorial() } }
+                    }
+                    Button { g.duel = 0; g.play() } label: { PillText("ИГРАТЬ", filled: true) }.frame(maxWidth: .infinity)
+                }
+                .padding(14).background(Color.white.opacity(0.07)).cornerRadius(18).frame(width: 340)
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(0..<Track.all.count, id: \.self) { i in
+                            let ok = g.level >= Track.unlock[i], on = g.track == i
+                            HStack {
+                                Button { if ok { g.track = i } } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(Track.all[i].name).font(.system(size: 16, weight: .bold)).foregroundColor(ok ? .white : .gray)
+                                        Text(ok ? "\(gn[Track.all[i].genre]) · \(Int(Track.all[i].bpm)) BPM" : "🔒 уровень \(Track.unlock[i])").font(.caption).foregroundColor(.gray)
+                                    }
+                                }
+                                Spacer()
+                                Button { g.synth.preview(Track.all[i]) } label: { Image(systemName: "play.circle").font(.title3).foregroundColor(.pink) }
+                            }
+                            .padding(12).background(on ? Color.pink.opacity(0.22) : Color.white.opacity(0.07)).cornerRadius(14)
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(on ? Color.pink : Color.clear, lineWidth: 2))
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 24).padding(.vertical, 8)
+        }
+        .sheet(isPresented: Binding(get: { sheet != 0 }, set: { if !$0 { sheet = 0; g.synth.stop() } })) {
+            if sheet == 1 { ScrollView { HelpView() } }
+            else if sheet == 2 { ScrollView { SettingsView(g: g) } }
+            else if sheet == 3 { ScrollView { VStack { ModsView(g: g); TextField("Сид (по желанию)", text: $g.seedText).keyboardType(.numberPad).textFieldStyle(.roundedBorder).padding(24) } } }
+            else if sheet == 4 { ReplaysView(g: g) }
+            else if sheet == 5 { ScrollView { StatsView() } }
+            else { AppearanceView(g: g) }
+        }
+    }
+}
+
 struct RootView: View {
     @StateObject var g = Game()
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(red: 0.02, green: 0.02, blue: 0.12), .black],
-                           startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+            Backdrop(g: g).ignoresSafeArea()
             switch g.phase {
             case .menu: MenuView(g: g)
             case .playing: PlayView(g: g)
