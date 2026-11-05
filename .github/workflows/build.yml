@@ -1,5 +1,13 @@
 name: Build IPA & Release
-on: [push, workflow_dispatch]
+on:
+  push:
+    paths:
+      - 'Sources/**'
+  workflow_dispatch:
+
+concurrency:
+  group: build
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -93,4 +101,4 @@ jobs:
           VERSION="v1.0.${{ github.run_number }}"
           gh release create "$VERSION" NeonBeat.ipa \
             --title "Neon Beat $VERSION" \
-            --notes "1.8: альбомный режим, поле 4:3 как в osu, новое меню"
+            --notes "1.9: меню в духе lazer, фоны, скины, формы, щадящий режим, уровни, задания дня"
