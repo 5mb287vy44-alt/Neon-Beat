@@ -1624,55 +1624,111 @@ extension Game {
 // MARK: - Анимированные фоны
 struct Backdrop: View {
     @ObservedObject var g: Game
-    func h(_ i: Int) -> Double { let x = sin(Double(i) * 12.9898) * 43758.5453; return x - floor(x) }
+    let hues: [Double] = [0.52, 0.85, 0.75, 0.08, 0.58, 0.33, 0.62, 0.95]
+
+    func h(_ i: Int) -> Double {
+        let x: Double = sin(Double(i) * 12.9898) * 43758.5453
+        return x - floor(x)
+    }
+
+    func drawGrid(_ c: GraphicsContext, _ s: CGSize, _ T: Double, _ acc: Color, _ pulse: Double) {
+        let w: CGFloat = s.width
+        let ht: CGFloat = s.height
+        let hy: CGFloat = ht * 0.55
+        let shift: Double = (T * 0.4).truncatingRemainder(dividingBy: 1)
+        for i in 0..<12 {
+            let f: Double = (Double(i) + shift) / 12
+            let y: CGFloat = hy + (ht - hy) * CGFloat(f * f)
+            let line = CGRect(x: 0, y: y, width: w, height: 1.5)
+            c.fill(Path(line), with: .color(acc.opacity(0.35 * f)))
+        }
+        for i in -10...10 {
+            let k = CGFloat(i)
+            let top = CGPoint(x: w / 2 + k * 8, y: hy)
+            let bottom = CGPoint(x: w / 2 + k * w / 8, y: ht)
+            var p = Path()
+            p.move(to: top)
+            p.addLine(to: bottom)
+            c.stroke(p, with: .color(acc.opacity(0.22)), lineWidth: 1)
+        }
+        let sun = CGRect(x: w / 2 - 70, y: hy - 110, width: 140, height: 140)
+        let sunAlpha: Double = 0.25 + 0.2 * pulse
+        c.fill(Path(ellipseIn: sun), with: .color(acc.opacity(sunAlpha)))
+    }
+
+    func drawStars(_ c: GraphicsContext, _ s: CGSize, _ T: Double) {
+        let w: Double = Double(s.width)
+        let ht: Double = Double(s.height)
+        for i in 0..<70 {
+            let speed: Double = 6 + 14 * h(i + 200)
+            let y: Double = (h(i + 100) * ht + T * speed).truncatingRemainder(dividingBy: ht)
+            let r: Double = 1 + 1.6 * h(i + 300)
+            let x: Double = h(i) * w
+            let twinkle: Double = 0.45 + 0.35 * sin(T * 2 + Double(i))
+            let dot = CGRect(x: x, y: y, width: r * 2, height: r * 2)
+            c.fill(Path(ellipseIn: dot), with: .color(Color.white.opacity(twinkle)))
+        }
+    }
+
+    func drawWaves(_ c: GraphicsContext, _ s: CGSize, _ T: Double, _ acc: Color, _ pulse: Double) {
+        let w: Double = Double(s.width)
+        let ht: Double = Double(s.height)
+        for k in 0..<4 {
+            let kd: Double = Double(k)
+            let base: Double = ht * (0.55 + 0.08 * kd)
+            let amp: Double = 14 + 10 * pulse
+            let spd: Double = 0.6 + 0.2 * kd
+            var p = Path()
+            p.move(to: CGPoint(x: 0, y: ht))
+            for x in stride(from: 0.0, through: w, by: 12.0) {
+                let wave: Double = sin(x / 90 + T * spd + kd) * amp
+                p.addLine(to: CGPoint(x: x, y: base + wave))
+            }
+            p.addLine(to: CGPoint(x: w, y: ht))
+            p.closeSubpath()
+            let alpha: Double = 0.10 + 0.04 * kd
+            c.fill(p, with: .color(acc.opacity(alpha)))
+        }
+    }
+
+    func drawRain(_ c: GraphicsContext, _ s: CGSize, _ T: Double, _ acc: Color) {
+        let w: Double = Double(s.width)
+        let ht: Double = Double(s.height)
+        for i in 0..<60 {
+            let sp: Double = 80 + 160 * h(i + 50)
+            let y: Double = (h(i + 90) * ht + T * sp).truncatingRemainder(dividingBy: ht)
+            let len: Double = 14 + 20 * h(i + 7)
+            let drop = CGRect(x: h(i) * w, y: y, width: 3, height: len)
+            c.fill(Path(drop), with: .color(acc.opacity(0.3)))
+        }
+    }
+
+    func paint(_ c: GraphicsContext, _ s: CGSize, _ now: Double) {
+        let T: Double = now * (g.calm ? 0.4 : 1.0)
+        let idx: Int = min(max(g.track, 0), hues.count - 1)
+        let hue: Double = hues[idx]
+        let acc = Color(hue: hue, saturation: 0.75, brightness: 1)
+        let dark = Color(hue: hue, saturation: 0.8, brightness: 0.18)
+        let playing: Bool = g.phase == .playing || g.phase == .mania || g.phase == .arcade
+        let live: Bool = !g.calm && playing
+        let since: Double = max(0, g.synth.time - g.synth.beatStart)
+        let pulse: Double = live ? max(0, 1 - since * 4) : 0
+        let grad = Gradient(colors: [dark, Color.black])
+        let full = Path(CGRect(origin: .zero, size: s))
+        c.fill(full, with: .linearGradient(grad, startPoint: .zero, endPoint: CGPoint(x: 0, y: s.height)))
+        switch g.bg {
+        case 0: drawGrid(c, s, T, acc, pulse)
+        case 1: drawStars(c, s, T)
+        case 2: drawWaves(c, s, T, acc, pulse)
+        case 3: drawRain(c, s, T, acc)
+        default: break
+        }
+    }
+
     var body: some View {
         TimelineView(.animation) { tl in
             Canvas { c, s in
-                let T = tl.date.timeIntervalSinceReferenceDate * (g.calm ? 0.4 : 1)
-                let hue = [0.52, 0.85, 0.75, 0.08, 0.58, 0.33, 0.62, 0.95][min(max(g.track, 0), 7)]
-                let acc = Color(hue: hue, saturation: 0.75, brightness: 1)
-                let live = !g.calm && (g.phase == .playing || g.phase == .mania || g.phase == .arcade)
-                let pulse = live ? max(0, 1 - max(0, g.synth.time - g.synth.beatStart) * 4) : 0
-                c.fill(Path(CGRect(origin: .zero, size: s)),
-                       with: .linearGradient(Gradient(colors: [Color(hue: hue, saturation: 0.8, brightness: 0.18), .black]),
-                                             startPoint: .zero, endPoint: CGPoint(x: 0, y: s.height)))
-                switch g.bg {
-                case 0:
-                    let hy = s.height * 0.55
-                    for i in 0..<12 {
-                        let f = (Double(i) + (T * 0.4).truncatingRemainder(dividingBy: 1)) / 12
-                        c.fill(Path(CGRect(x: 0, y: hy + (s.height - hy) * CGFloat(f * f), width: s.width, height: 1.5)), with: .color(acc.opacity(0.35 * f)))
-                    }
-                    for i in -10...10 {
-                        var p = Path()
-                        p.move(to: CGPoint(x: s.width / 2 + CGFloat(i) * 8, y: hy))
-                        p.addLine(to: CGPoint(x: s.width / 2 + CGFloat(i) * s.width / 8, y: s.height))
-                        c.stroke(p, with: .color(acc.opacity(0.22)), lineWidth: 1)
-                    }
-                    c.fill(Path(ellipseIn: CGRect(x: s.width / 2 - 70, y: hy - 110, width: 140, height: 140)), with: .color(acc.opacity(0.25 + 0.2 * pulse)))
-                case 1:
-                    for i in 0..<70 {
-                        let y = (h(i + 100) * Double(s.height) + T * (6 + 14 * h(i + 200))).truncatingRemainder(dividingBy: Double(s.height))
-                        let r = 1 + 1.6 * h(i + 300)
-                        c.fill(Path(ellipseIn: CGRect(x: h(i) * Double(s.width), y: y, width: r * 2, height: r * 2)), with: .color(Color.white.opacity(0.45 + 0.35 * sin(T * 2 + Double(i)))))
-                    }
-                case 2:
-                    for k in 0..<4 {
-                        var p = Path()
-                        p.move(to: CGPoint(x: 0, y: s.height))
-                        for x in stride(from: 0.0, through: Double(s.width), by: 12) {
-                            p.addLine(to: CGPoint(x: x, y: Double(s.height) * (0.55 + 0.08 * Double(k)) + sin(x / 90 + T * (0.6 + 0.2 * Double(k)) + Double(k)) * (14 + 10 * pulse)))
-                        }
-                        p.addLine(to: CGPoint(x: s.width, y: s.height)); p.closeSubpath()
-                        c.fill(p, with: .color(acc.opacity(0.10 + 0.04 * Double(k))))
-                    }
-                case 3:
-                    for i in 0..<60 {
-                        let y = (h(i + 90) * Double(s.height) + T * (80 + 160 * h(i + 50))).truncatingRemainder(dividingBy: Double(s.height))
-                        c.fill(Path(CGRect(x: h(i) * Double(s.width), y: y, width: 3, height: 14 + 20 * h(i + 7))), with: .color(acc.opacity(0.3)))
-                    }
-                default: break
-                }
+                paint(c, s, tl.date.timeIntervalSinceReferenceDate)
             }
         }
     }
