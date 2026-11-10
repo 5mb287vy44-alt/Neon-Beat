@@ -50,6 +50,7 @@ final class Synth {
     private var isPreview = false, previewing = 0
     private var keepGenre: Int? = nil
     private var curBar = -1, curStep = -1
+    private var kickG = 1.0, hatG = 1.0, snareG = 1.0, bassG = 1.0, padG = 1.0, melG = 1.0
     private var padF = [110.0, 130.0, 165.0], bassF = 55.0, melF = 0.0
     private let roots: [Double] = [55, 43.65, 65.41, 49]
     private let chords: [[Double]] = [
@@ -97,6 +98,8 @@ final class Synth {
             if let me = self, me.previewing == id { me.stop() }
         }
     }
+    func melodyAt(_ bar: Int, _ step: Int) -> Int? { melody(bar, step) }
+    var barNow: Int { beatIdx / 4 }
     private func fq(_ d: Int) -> Double {
         let oct = Int(floor(Double(d) / 7)), k = ((d % 7) + 7) % 7
         return trk.root * pow(2, Double(trk.scale[k] + 12 * oct) / 12)
@@ -139,18 +142,22 @@ final class Synth {
             var v = 0.0, h = 0.0
             // кик
             kickPh += twoPi * (45 + 110 * exp(-tb * 30)) / sr
-            v += sin(kickPh) * exp(-tb * 12) * (genre == 2 ? 0.95 : (genre == 3 ? 0.5 : 0.8))
+            v += sin(kickPh) * exp(-tb * 12) * (genre == 2 ? 0.95 : (genre == 3 ? 0.5 : 0.8)) * kickG
             // хэт на доле «и»
             let x = tb - beatLen / 2
             if x >= 0 && genre != 3 {
                 noise = noise &* 1664525 &+ 1013904223
                 let nz = Double(Int32(bitPattern: noise)) / 2147483648.0
-                v += nz * exp(-x * 70) * (genre == 2 ? 0.26 : 0.18)
+                v += nz * exp(-x * 70) * (genre == 2 ? 0.26 : 0.18) * hatG
             }
             let bar = beatIdx / 4, bib = beatIdx % 4
             let half = beatLen / 2
             if bar != curBar {
                 curBar = bar
+                let sec = Director.section(bar)
+                let ramp = sec == 2 ? 1 + 0.12 * Double(bar % 8) : 1.0
+                kickG = Director.kick[sec]; hatG = Director.hat[sec] * ramp; snareG = Director.snare[sec] * ramp
+                bassG = Director.bass[sec]; padG = Director.pad[sec]; melG = Director.mel[sec]
                 let cd = trk.prog[bar % trk.prog.count]
                 padF = [fq(cd), fq(cd + 2), fq(cd + 4)]
                 bassF = fq(cd - 7)
@@ -158,17 +165,17 @@ final class Synth {
             // снейр на 2 и 4
             if bib == 1 || bib == 3 {
                 noise = noise &* 1664525 &+ 1013904223
-                v += Double(Int32(bitPattern: noise)) / 2147483648.0 * exp(-tb * (genre == 1 ? 30 : 16)) * (genre == 3 ? 0.14 : 0.3)
+                v += Double(Int32(bitPattern: noise)) / 2147483648.0 * exp(-tb * (genre == 1 ? 30 : 16)) * (genre == 3 ? 0.14 : 0.3) * snareG
             }
             // бас
             let bsin = sin(twoPi * bassF * tb)
             let bw = genre == 1 ? (bsin >= 0 ? 0.5 : -0.5) : bsin
-            v += bw * exp(-(genre == 2 && x >= 0 ? x : tb) * (genre == 2 ? 6 : 2.5)) * 0.32
+            v += bw * exp(-(genre == 2 && x >= 0 ? x : tb) * (genre == 2 ? 6 : 2.5)) * 0.32 * bassG
             if bar >= 1 {
                 // пэд: аккорд плавно «дышит» в течение такта
                 if genre != 1 {
                     let pe = sin(Double.pi * (Double(bib) * beatLen + tb) / (4 * beatLen))
-                    v += (sin(twoPi * padF[0] * t) + sin(twoPi * padF[1] * t) + sin(twoPi * padF[2] * t)) * pe * 0.045
+                    v += (sin(twoPi * padF[0] * t) + sin(twoPi * padF[1] * t) + sin(twoPi * padF[2] * t)) * pe * 0.045 * padG
                 }
                 // мелодия по восьмым
                 let st = bib * 2 + (tb >= half ? 1 : 0)
@@ -182,7 +189,7 @@ final class Synth {
                     var w = sin(ph) + 0.5 * sin(2 * ph) + 0.3 * sin(3 * ph)
                     if genre == 1 { w = sin(ph) >= 0 ? 0.6 : -0.6 }
                     else if genre == 3 { w = sin(ph + 0.3 * sin(twoPi * 5 * te)) }
-                    v += w * exp(-te * (genre == 3 ? 3 : (genre == 2 ? 10 : 6))) * (genre == 3 ? 0.11 : 0.15)
+                    v += w * exp(-te * (genre == 3 ? 3 : (genre == 2 ? 10 : 6))) * (genre == 3 ? 0.11 : 0.15) * melG
                 }
             }
             // звук попадания
@@ -272,6 +279,9 @@ final class Game: ObservableObject {
     var offs: [(Double, Double)] = []
     var flashP = CGPoint(x: 200, y: 400)
     var trail: [(CGPoint, Double)] = []
+    var lastSec = -1, secStart = -9.0
+    var boss = false, pendingBoss = false, bossHP = 1.0, bossAng = 0.0, won = false, rewarded = false
+    var campaignIdx = -1
     var origin = CGPoint.zero
     @Published var track = UserDefaults.standard.integer(forKey: "nb_track") {
         didSet {
@@ -331,6 +341,7 @@ final class Game: ObservableObject {
         score = 0; combo = 0; maxCombo = 0; total = 0; accSum = 0; hp = 100
         record = false; ending = false; paused = false
         UIApplication.shared.isIdleTimerDisabled = true
+        boss = pendingBoss; pendingBoss = false; bossHP = 1; bossAng = 0; won = false; rewarded = false; campaignIdx = -1
         try? synth.start()
         phase = .playing
     }
@@ -358,13 +369,16 @@ final class Game: ObservableObject {
     func spawn(_ s: Int) {
         let n = s / 2, half = s % 2 == 1
         let base = half ? (n < 48 ? 0 : min(Double(n - 48) / 400, 0.5)) : min(0.55 + Double(n) / 300, 0.9)
-        let stream = n >= 32 && n % 32 >= 28
-        let p = stream ? 1.0 : min(base * dens[diff], 0.95)
+        let stream = (n >= 32 && n % 32 >= 28) || (boss && ((bossHP <= 0.66 && !half) || bossHP <= 0.33))
+        let bar = n / 4, step = (n % 4) * 2 + (half ? 1 : 0)
+        let mel = synth.melodyAt(bar, step)
+        let dm = Director.density(bar) * (mel != nil ? 1.5 : 0.55)
+        let p = stream ? 1.0 : min(base * dens[diff] * dm, 0.95)
         let r = rng.unit(), a = rng.unit(), d = rng.unit(), k = rng.unit()
         let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
         guard t >= blockUntil else { return }
         let appr = max(0.45, (0.95 - Double(n) / 400) * apprK[diff] * apprMul)
-        if !half && n >= 40 && n % 48 == 0 {          // спиннер
+        if !half && Director.spinnerAt(n) {          // спиннер
             let dur = Tempo.len(n) * 4
             notes.append(Note(t: t, x: 0.5, y: 0.5, appr: 0.6, kind: 2, dur: dur))
             blockUntil = t + dur + 0.5; lx = 0.5; ly = 0.5
@@ -374,7 +388,14 @@ final class Game: ObservableObject {
         let dist = min(0.12 + Double(n) * 0.0015, 0.45) * (0.6 + 0.4 * d) * (stream ? 0.35 : 1)
         lx = min(max(lx + cos(a * 2 * Double.pi) * dist * Double(size.height / size.width) * 1.3, 0.1), 0.9)
         ly = min(max(ly + sin(a * 2 * Double.pi) * dist * 0.7, 0.2), 0.82)
-        if !half && n >= 24 && k < 0.2 && !stream {               // слайдер
+        if let m = mel { ly = 0.82 - 0.62 * Double(((m % 14) + 14) % 14) / 13 }
+        if boss && bossHP <= 0.33 {
+            bossAng += 0.6
+            let rr = 0.18 + 0.1 * sin(bossAng * 0.2)
+            lx = min(max(0.5 + cos(bossAng) * rr * Double(size.height / size.width) * 1.6, 0.1), 0.9)
+            ly = min(max(0.5 + sin(bossAng) * rr * 1.5, 0.2), 0.82)
+        }
+        if !half && n >= 24 && k < Director.sliderChance(bar) && !stream {               // слайдер
             let rep = (n >= 64 && k < 0.08) ? 2 : 1
             let dur = Tempo.len(n) * (d < 0.5 ? 1 : 2) * Double(rep)
             let ang = (a + 0.5) * 2 * Double.pi
@@ -493,6 +514,10 @@ final class Game: ObservableObject {
             if on(7) { hp = 0 }
         }
         prevCombo = combo
+        if !ending && boss && bossHP <= 0 { ending = true; won = true; DispatchQueue.main.async { self.end() } }
+        if !ending && !boss && campaignIdx >= 0 && synth.barNow >= Campaign.levels[campaignIdx].bars {
+            ending = true; won = true; DispatchQueue.main.async { self.end() }
+        }
         if hp <= 0 && !ending {
             ending = true
             DispatchQueue.main.async { self.end() }
@@ -523,6 +548,7 @@ final class Game: ObservableObject {
         accSum += Double(pts)
         score += pts * (1 + combo / 25)
         hp = min(100, hp + [0, 1, 2, 4][kind])
+        if boss { bossHP = max(0, bossHP - [0.0, 0.004, 0.008, 0.012][kind] * [1.25, 1.0, 0.85][min(diff, 2)]) }
         synth.hitCounter += 1
         fx.append(FX(x: notes[bi].x, y: notes[bi].y, born: t, kind: kind))
         if vibe && !on(8) { hapticL.impactOccurred() }
@@ -765,8 +791,24 @@ struct PlayView: View {
     }
 
     func hud(_ c: GraphicsContext, _ s: CGSize) {
+        let secNow = Director.section(g.synth.barNow)
+        if secNow != g.lastSec { g.lastSec = secNow; g.secStart = g.now }
+        let ba: Double = max(0, 1 - (g.now - g.secStart) / 2.0)
+        if ba > 0 && g.phase == .playing {
+            let label = Text(Director.names[secNow]).font(.system(size: 54, weight: .black)).foregroundColor(Color.white.opacity(0.55 * ba))
+            c.draw(label, at: CGPoint(x: s.width / 2, y: s.height * 0.2))
+        }
         let fl = g.calm ? 0 : max(0, 1 - (g.now - g.flashT) * 4)
         if fl > 0 { c.fill(Path(CGRect(origin: .zero, size: s)), with: .color(Color.white.opacity(0.14 * fl))) }
+        if g.boss {
+            let bw: CGFloat = min(s.width * 0.4, 360)
+            let bx: CGFloat = (s.width - bw) / 2
+            let hpw: CGFloat = bw * CGFloat(g.bossHP)
+            let phase: String = g.bossHP > 0.66 ? "ФАЗА 1" : (g.bossHP > 0.33 ? "ФАЗА 2" : "ФАЗА 3")
+            c.fill(Path(roundedRect: CGRect(x: bx, y: 84, width: bw, height: 12), cornerRadius: 6), with: .color(Color.white.opacity(0.15)))
+            c.fill(Path(roundedRect: CGRect(x: bx, y: 84, width: hpw, height: 12), cornerRadius: 6), with: .color(Color.pink))
+            c.draw(Text("БОСС · " + phase).font(.system(size: 13, weight: .heavy)).foregroundColor(.pink), at: CGPoint(x: s.width / 2, y: 74))
+        }
         // HUD
         let ix: CGFloat = s.width > s.height ? 60 : 20
         let w = s.width - 2 * ix
@@ -895,7 +937,10 @@ struct OverView: View {
     var body: some View {
         HStack(spacing: 30) {
             VStack(spacing: 6) {
-                Text("ИГРА ОКОНЧЕНА").font(.system(size: 20, weight: .black)).foregroundColor(.white)
+                Text(g.won ? "ПОБЕДА!" : "ИГРА ОКОНЧЕНА").font(.system(size: 20, weight: .black)).foregroundColor(.white)
+                if g.campaignIdx >= 0 && g.won {
+                    Text(String(repeating: "★", count: g.lastStars) + String(repeating: "☆", count: 3 - g.lastStars)).font(.system(size: 26)).foregroundColor(.yellow)
+                }
                 Text(g.rank).font(.system(size: 96, weight: .black)).foregroundColor(.yellow)
                     .scaleEffect(pop ? 1 : 2.6).opacity(pop ? 1 : 0)
                 if g.record { Text("НОВЫЙ РЕКОРД!").font(.system(size: 18, weight: .heavy)).foregroundColor(.yellow) }
@@ -912,7 +957,10 @@ struct OverView: View {
                         .font(.system(size: 22, weight: .black)).foregroundColor(.pink)
                     Text("Игрок 1: \(g.duelScore)   Игрок 2: \(g.score)").foregroundColor(.gray)
                 } else {
-                    Button { g.start() } label: { PillText("ЕЩЁ РАЗ", filled: true) }
+                    if g.won && g.campaignIdx >= 0 && g.campaignIdx < 11 {
+                        Button { g.startLevel(g.campaignIdx + 1) } label: { PillText("ДАЛЬШЕ", filled: true) }
+                    }
+                    Button { g.retry() } label: { PillText("ЕЩЁ РАЗ", filled: g.campaignIdx < 0 || !g.won) }
                 }
                 Button { g.seedText = String(g.seed); g.start() } label: { PillText("ТА ЖЕ КАРТА", filled: false) }
                 ShareLink(item: cardImage(g), preview: SharePreview("Результат Neon Beat", image: cardImage(g))) { PillText("ПОДЕЛИТЬСЯ", filled: false) }
@@ -921,7 +969,7 @@ struct OverView: View {
             .frame(maxWidth: .infinity)
         }
         .padding(30)
-        .onAppear { withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) { pop = true } }
+        .onAppear { g.finishCampaign(); withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) { pop = true } }
         .task { for i in 1...30 { shown = g.score * i / 30; try? await Task.sleep(nanoseconds: 30_000_000) } }
     }
 }
@@ -1149,6 +1197,7 @@ extension Game {
         return mode == 0 ? best : UserDefaults.standard.integer(forKey: "\(k)\(diff)")
     }
     func play() {
+        campaignIdx = -1
         if mode == 1 { applyOrientation(orient); phase = .mania }
         else if mode >= 2 { applyOrientation(orient == 0 ? (mode == 2 ? 2 : 1) : orient); phase = .arcade }
         else { tutorial = false; start() }
@@ -1801,7 +1850,7 @@ struct MenuView: View {
                 Spacer()
                 Text("NEON BEAT ∞").font(.system(size: 22, weight: .black, design: .monospaced)).foregroundColor(.pink).shadow(color: .pink, radius: 8)
                 Spacer()
-                icon("paintpalette", 6); icon("play.rectangle", 4); icon("chart.bar", 5); icon("questionmark.circle", 1); icon("gearshape", 2)
+                icon("map", 7); icon("paintpalette", 6); icon("play.rectangle", 4); icon("chart.bar", 5); icon("questionmark.circle", 1); icon("gearshape", 2)
             }
             .padding(.horizontal, 24).padding(.top, 8)
             HStack(spacing: 16) {
@@ -1853,7 +1902,120 @@ struct MenuView: View {
             else if sheet == 3 { ScrollView { VStack { ModsView(g: g); TextField("Сид (по желанию)", text: $g.seedText).keyboardType(.numberPad).textFieldStyle(.roundedBorder).padding(24) } } }
             else if sheet == 4 { ReplaysView(g: g) }
             else if sheet == 5 { ScrollView { StatsView() } }
-            else { AppearanceView(g: g) }
+            else if sheet == 6 { AppearanceView(g: g) }
+            else { CampaignView(g: g) }
+        }
+    }
+}
+
+// MARK: - Режиссёр песни: интро, куплет, подъём, дроп, брейк
+enum Director {
+    static func section(_ bar: Int) -> Int {
+        if bar < 8 { return 0 }
+        return [1, 2, 3, 4][((bar - 8) / 8) % 4]
+    }
+    static let names = ["ИНТРО", "КУПЛЕТ", "ПОДЪЁМ", "ДРОП!", "БРЕЙК"]
+    static let kick: [Double] = [0.6, 1.0, 1.0, 1.15, 0.0]
+    static let hat: [Double] = [0.6, 1.0, 1.3, 1.2, 0.5]
+    static let snare: [Double] = [0.0, 0.8, 1.2, 1.2, 0.0]
+    static let bass: [Double] = [0.5, 1.0, 1.0, 1.25, 0.4]
+    static let pad: [Double] = [1.4, 0.8, 1.0, 1.0, 1.6]
+    static let mel: [Double] = [0.5, 1.0, 1.0, 1.25, 1.0]
+    static let dens: [Double] = [0.4, 1.0, 1.15, 1.4, 0.45]
+    static let sliders: [Double] = [0.05, 0.12, 0.1, 0.12, 0.45]
+    static func density(_ bar: Int) -> Double { dens[section(bar)] }
+    static func sliderChance(_ bar: Int) -> Double { sliders[section(bar)] }
+    static func spinnerAt(_ n: Int) -> Bool { n >= 40 && section(n / 4) == 2 && (n / 4) % 8 == 7 && n % 4 == 0 }
+}
+
+// MARK: - Кампания и боссы
+struct Level { let name: String; let track: Int; let seed: Int; let diff: Int; let bars: Int; let boss: Bool }
+enum Campaign {
+    static let chapters = ["Глава 1 · Неон", "Глава 2 · Клуб", "Глава 3 · Финал"]
+    static let levels: [Level] = [
+        Level(name: "Разминка", track: 0, seed: 101, diff: 0, bars: 24, boss: false),
+        Level(name: "Ночной драйв", track: 4, seed: 102, diff: 0, bars: 32, boss: false),
+        Level(name: "Пиксельный дождь", track: 1, seed: 103, diff: 1, bars: 32, boss: false),
+        Level(name: "БОСС: Страж сетки", track: 0, seed: 104, diff: 1, bars: 0, boss: true),
+        Level(name: "Лофи-окно", track: 3, seed: 201, diff: 1, bars: 32, boss: false),
+        Level(name: "Клубная ночь", track: 2, seed: 202, diff: 1, bars: 40, boss: false),
+        Level(name: "Кристальная пещера", track: 6, seed: 203, diff: 2, bars: 40, boss: false),
+        Level(name: "БОСС: Король клуба", track: 7, seed: 204, diff: 2, bars: 0, boss: true),
+        Level(name: "Чип-герой", track: 5, seed: 301, diff: 2, bars: 40, boss: false),
+        Level(name: "Закатный забег", track: 4, seed: 302, diff: 2, bars: 48, boss: false),
+        Level(name: "Полночный хаус", track: 2, seed: 303, diff: 2, bars: 48, boss: false),
+        Level(name: "ФИНАЛ: Нео-Владыка", track: 0, seed: 304, diff: 2, bars: 0, boss: true)
+    ]
+    static func stars(_ i: Int) -> Int { UserDefaults.standard.integer(forKey: "cmp_\(i)") }
+    static func unlocked(_ i: Int) -> Bool { i == 0 || stars(i - 1) >= 1 }
+}
+extension Game {
+    var lastStars: Int { (rank == "SS" || rank == "S") ? 3 : (rank == "A" ? 2 : 1) }
+    func startLevel(_ i: Int) {
+        let L = Campaign.levels[i]
+        mode = 0; practice = false; tutorial = false; duel = 0; mods = []
+        diff = L.diff; track = L.track; seedText = String(L.seed)
+        pendingBoss = L.boss
+        start()
+        campaignIdx = i
+    }
+    func startBoss() {
+        mode = 0; practice = false; tutorial = false; duel = 0; mods = []
+        seedText = ""
+        pendingBoss = true
+        start()
+        campaignIdx = -1
+    }
+    func retry() {
+        if campaignIdx >= 0 { startLevel(campaignIdx) } else { pendingBoss = boss; start() }
+    }
+    func finishCampaign() {
+        guard won, !rewarded else { return }
+        rewarded = true
+        UserDefaults.standard.set(Stats.xp + (boss ? 300 : 150), forKey: "st_xp")
+        if campaignIdx >= 0 {
+            UserDefaults.standard.set(max(Campaign.stars(campaignIdx), lastStars), forKey: "cmp_\(campaignIdx)")
+        }
+    }
+}
+struct CampaignView: View {
+    @ObservedObject var g: Game
+    @Environment(\.dismiss) var dismiss
+    func go(_ i: Int) {
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { g.startLevel(i) }
+    }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Кампания").font(.title.bold())
+                Button {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { g.startBoss() }
+                } label: { PillText("БОЙ С БОССОМ", filled: false) }
+                ForEach(0..<3, id: \.self) { ch in
+                    Text(Campaign.chapters[ch]).font(.headline).foregroundColor(.pink).padding(.top, 6)
+                    ForEach(0..<4, id: \.self) { k in
+                        let i = ch * 4 + k
+                        let L = Campaign.levels[i]
+                        let ok = Campaign.unlocked(i)
+                        let st = Campaign.stars(i)
+                        Button { if ok { go(i) } } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(L.name).font(.system(size: 16, weight: .bold)).foregroundColor(ok ? .white : .gray)
+                                    Text(L.boss ? "Босс-файт" : "\(L.bars) тактов").font(.caption).foregroundColor(.gray)
+                                }
+                                Spacer()
+                                Text(ok ? String(repeating: "★", count: st) + String(repeating: "☆", count: 3 - st) : "🔒")
+                                    .foregroundColor(.yellow)
+                            }
+                            .padding(12).background(Color.white.opacity(0.08)).cornerRadius(12)
+                        }
+                    }
+                }
+            }
+            .padding(24)
         }
     }
 }
