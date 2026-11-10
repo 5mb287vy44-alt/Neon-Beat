@@ -1,13 +1,5 @@
 name: Build IPA & Release
-on:
-  push:
-    paths:
-      - 'Sources/App.swift'
-  workflow_dispatch:
-
-concurrency:
-  group: build-ipa
-  cancel-in-progress: true
+on: [push, workflow_dispatch]
 
 permissions:
   contents: write
