@@ -2,11 +2,11 @@ name: Build IPA & Release
 on:
   push:
     paths:
-      - 'Sources/**'
+      - 'Sources/App.swift'
   workflow_dispatch:
 
 concurrency:
-  group: build
+  group: build-ipa
   cancel-in-progress: true
 
 permissions:
@@ -101,4 +101,4 @@ jobs:
           VERSION="v1.0.${{ github.run_number }}"
           gh release create "$VERSION" NeonBeat.ipa \
             --title "Neon Beat $VERSION" \
-            --notes "1.9: меню в духе lazer, фоны, скины, формы, щадящий режим, уровни, задания дня"
+            --notes "2.0b: боссы с тремя фазами и кампания из 12 уровней"
