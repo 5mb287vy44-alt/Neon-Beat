@@ -5,7 +5,8 @@ import AVFoundation
 enum Tempo {
     static var speed = 1.0
     static var base = 100.0
-    static func bpm(_ n: Int) -> Double { min(base + Double(n / 16) * 3, base * 1.7) * speed }
+    static var cap = 1.7
+    static func bpm(_ n: Int) -> Double { min(base + Double(n / 16) * 3, base * cap) * speed }
     static func len(_ n: Int) -> Double { 60 / bpm(n) }
     private static var cache: [Double] = [0]
     static func reset() { cache = [0] }
@@ -282,6 +283,8 @@ final class Game: ObservableObject {
     var lastSec = -1, secStart = -9.0
     var boss = false, pendingBoss = false, bossHP = 1.0, bossAng = 0.0, won = false, rewarded = false
     var campaignIdx = -1
+    var endless = false, pendingEndless = false, lastCP = 0, cpT = -9.0, runSaved = false
+    var ghost: [Int] = [], ghostRec: [Int] = []
     var origin = CGPoint.zero
     @Published var track = UserDefaults.standard.integer(forKey: "nb_track") {
         didSet {
@@ -342,6 +345,7 @@ final class Game: ObservableObject {
         record = false; ending = false; paused = false
         UIApplication.shared.isIdleTimerDisabled = true
         boss = pendingBoss; pendingBoss = false; bossHP = 1; bossAng = 0; won = false; rewarded = false; campaignIdx = -1
+        endless = pendingEndless; pendingEndless = false; Tempo.cap = endless ? 2.4 : 1.7; lastCP = 0; cpT = -9; runSaved = false; ghostRec = []; ghost = loadGhost()
         try? synth.start()
         phase = .playing
     }
@@ -372,7 +376,8 @@ final class Game: ObservableObject {
         let stream = (n >= 32 && n % 32 >= 28) || (boss && ((bossHP <= 0.66 && !half) || bossHP <= 0.33))
         let bar = n / 4, step = (n % 4) * 2 + (half ? 1 : 0)
         let mel = synth.melodyAt(bar, step)
-        let dm = Director.density(bar) * (mel != nil ? 1.5 : 0.55)
+        let boost: Double = endless ? min(1.6, 1 + Double(bar) / 80) : 1.0
+        let dm = Director.density(bar) * (mel != nil ? 1.5 : 0.55) * boost
         let p = stream ? 1.0 : min(base * dens[diff] * dm, 0.95)
         let r = rng.unit(), a = rng.unit(), d = rng.unit(), k = rng.unit()
         let t = Tempo.time(n) + (half ? Tempo.len(n) / 2 : 0)
@@ -518,6 +523,9 @@ final class Game: ObservableObject {
         if !ending && !boss && campaignIdx >= 0 && synth.barNow >= Campaign.levels[campaignIdx].bars {
             ending = true; won = true; DispatchQueue.main.async { self.end() }
         }
+        let bn = synth.barNow
+        while ghostRec.count <= bn { ghostRec.append(score) }
+        if endless && bn / 16 > lastCP { lastCP = bn / 16; hp = min(100, hp + 35); cpT = t }
         if hp <= 0 && !ending {
             ending = true
             DispatchQueue.main.async { self.end() }
@@ -745,8 +753,9 @@ struct PlayView: View {
             let fa = g.on(5) ? a * min(1, max(0, (dt - n.appr * 0.3) / (n.appr * 0.25))) : a
             ball(c, p, r, fa, nums[i], ap, pal[cix[i] ?? 0], a)
         }
-        if let tp = g.touches.pts.values.first { g.trail.append((tp, t)) }
+        if !g.paused, let tp = g.touches.pts.values.first { g.trail.append((tp, t)) }
         g.trail.removeAll { t - $0.1 > 0.3 }
+        if g.trail.count > 40 { g.trail.removeFirst(g.trail.count - 40) }
         for (q, bt) in g.trail {
             let al = 1 - (t - bt) / 0.3, rr = CGFloat(14 * al)
             c.fill(Path(ellipseIn: CGRect(x: q.x - rr, y: q.y - rr, width: 2 * rr, height: 2 * rr)), with: .color(g.palette[0].opacity(0.35 * al)))
@@ -795,11 +804,29 @@ struct PlayView: View {
         if secNow != g.lastSec { g.lastSec = secNow; g.secStart = g.now }
         let ba: Double = max(0, 1 - (g.now - g.secStart) / 2.0)
         if ba > 0 && g.phase == .playing {
-            let label = Text(Director.names[secNow]).font(.system(size: 54, weight: .black)).foregroundColor(Color.white.opacity(0.55 * ba))
-            c.draw(label, at: CGPoint(x: s.width / 2, y: s.height * 0.2))
+            let label = Text(Director.names[secNow]).font(.system(size: 54, weight: .black)).foregroundColor(Color.white.opacity(0.3 * ba))
+            c.draw(label, at: CGPoint(x: s.width / 2, y: s.height * 0.5))
         }
         let fl = g.calm ? 0 : max(0, 1 - (g.now - g.flashT) * 4)
         if fl > 0 { c.fill(Path(CGRect(origin: .zero, size: s)), with: .color(Color.white.opacity(0.14 * fl))) }
+        let barNow: Int = g.synth.barNow
+        if !g.ghost.isEmpty && g.phase == .playing {
+            let gs: Int = g.ghost[min(barNow, g.ghost.count - 1)]
+            let d: Int = g.score - gs
+            let sign: String = d >= 0 ? "+" : ""
+            let label: String = "Призрак \(sign)\(d)"
+            c.draw(Text(label).font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(d >= 0 ? Color.green : Color.red),
+                   at: CGPoint(x: 60, y: 120), anchor: .leading)
+        }
+        if g.endless {
+            c.draw(Text("∞ такт \(barNow)").font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(Color.pink),
+                   at: CGPoint(x: s.width / 2, y: 120))
+        }
+        let cpa: Double = max(0, 1 - (g.now - g.cpT) / 2.5)
+        if cpa > 0 {
+            c.draw(Text("ЧЕКПОИНТ · +HP").font(.system(size: 30, weight: .black)).foregroundColor(Color.green.opacity(cpa)),
+                   at: CGPoint(x: s.width / 2, y: s.height * 0.32))
+        }
         if g.boss {
             let bw: CGFloat = min(s.width * 0.4, 360)
             let bx: CGFloat = (s.width - bw) / 2
@@ -938,6 +965,7 @@ struct OverView: View {
         HStack(spacing: 30) {
             VStack(spacing: 6) {
                 Text(g.won ? "ПОБЕДА!" : "ИГРА ОКОНЧЕНА").font(.system(size: 20, weight: .black)).foregroundColor(.white)
+                if g.endless { Text("∞ тактов: \(g.synth.barNow)").font(.system(size: 16, weight: .bold)).foregroundColor(.pink) }
                 if g.campaignIdx >= 0 && g.won {
                     Text(String(repeating: "★", count: g.lastStars) + String(repeating: "☆", count: 3 - g.lastStars)).font(.system(size: 26)).foregroundColor(.yellow)
                 }
@@ -969,7 +997,7 @@ struct OverView: View {
             .frame(maxWidth: .infinity)
         }
         .padding(30)
-        .onAppear { g.finishCampaign(); withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) { pop = true } }
+        .onAppear { g.finishCampaign(); g.finishRun(); withAnimation(.spring(response: 0.6, dampingFraction: 0.5)) { pop = true } }
         .task { for i in 1...30 { shown = g.score * i / 30; try? await Task.sleep(nanoseconds: 30_000_000) } }
     }
 }
@@ -1896,7 +1924,7 @@ struct MenuView: View {
             }
             .padding(.horizontal, 24).padding(.vertical, 8)
         }
-        .sheet(isPresented: Binding(get: { sheet != 0 }, set: { if !$0 { sheet = 0; g.synth.stop() } })) {
+        .sheet(isPresented: Binding(get: { sheet != 0 }, set: { if !$0 { sheet = 0; if g.phase == .menu { g.synth.stop() } } })) {
             if sheet == 1 { ScrollView { HelpView() } }
             else if sheet == 2 { ScrollView { SettingsView(g: g) } }
             else if sheet == 3 { ScrollView { VStack { ModsView(g: g); TextField("Сид (по желанию)", text: $g.seedText).keyboardType(.numberPad).textFieldStyle(.roundedBorder).padding(24) } } }
@@ -1967,7 +1995,7 @@ extension Game {
         campaignIdx = -1
     }
     func retry() {
-        if campaignIdx >= 0 { startLevel(campaignIdx) } else { pendingBoss = boss; start() }
+        if campaignIdx >= 0 { startLevel(campaignIdx) } else { pendingBoss = boss; pendingEndless = endless; start() }
     }
     func finishCampaign() {
         guard won, !rewarded else { return }
@@ -1988,11 +2016,20 @@ struct CampaignView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Кампания").font(.title.bold())
+                Text("Кампания и режимы").font(.title.bold())
                 Button {
                     dismiss()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { g.startBoss() }
                 } label: { PillText("БОЙ С БОССОМ", filled: false) }
+                Button {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { g.startEndless() }
+                } label: { PillText("БЕСКОНЕЧНЫЙ", filled: false) }
+                Text("Рекорды бесконечного режима").font(.headline).foregroundColor(.pink).padding(.top, 6)
+                if LB.all.isEmpty { Text("Пока пусто").font(.footnote).foregroundColor(.gray) }
+                ForEach(Array(LB.all.prefix(5).enumerated()), id: \.offset) { i, e in
+                    Text("\(i + 1). \(e.score) · \(e.bars) тактов").foregroundColor(.white)
+                }
                 ForEach(0..<3, id: \.self) { ch in
                     Text(Campaign.chapters[ch]).font(.headline).foregroundColor(.pink).padding(.top, 6)
                     ForEach(0..<4, id: \.self) { k in
@@ -2016,6 +2053,43 @@ struct CampaignView: View {
                 }
             }
             .padding(24)
+        }
+    }
+}
+
+// MARK: - Бесконечный режим, рекорды и призрак
+struct LBEntry: Codable, Identifiable { var id = UUID(); var score: Int; var bars: Int; var date: Date }
+enum LB {
+    static var all: [LBEntry] {
+        get { (UserDefaults.standard.data(forKey: "lb_endless").flatMap { try? JSONDecoder().decode([LBEntry].self, from: $0) }) ?? [] }
+        set { if let d = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(d, forKey: "lb_endless") } }
+    }
+    static func add(_ score: Int, _ bars: Int) {
+        var l = all
+        l.append(LBEntry(score: score, bars: bars, date: Date()))
+        l.sort { $0.score > $1.score }
+        all = Array(l.prefix(10))
+    }
+}
+extension Game {
+    var ghostKey: String { "gh_\(seed)_\(diff)_\(track)" }
+    func loadGhost() -> [Int] { (UserDefaults.standard.array(forKey: ghostKey) as? [Int]) ?? [] }
+    func startEndless() {
+        mode = 0; practice = false; tutorial = false; duel = 0; mods = []
+        seedText = ""
+        pendingEndless = true
+        start()
+        campaignIdx = -1
+    }
+    func finishRun() {
+        guard !runSaved else { return }
+        runSaved = true
+        if endless { LB.add(score, synth.barNow) }
+        guard !replaying, !tutorial, !practice else { return }
+        let old = UserDefaults.standard.integer(forKey: ghostKey + "_s")
+        if score > old {
+            UserDefaults.standard.set(ghostRec, forKey: ghostKey)
+            UserDefaults.standard.set(score, forKey: ghostKey + "_s")
         }
     }
 }
